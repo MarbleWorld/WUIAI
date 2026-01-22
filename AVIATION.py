@@ -1,3 +1,4 @@
+# AVIATION.py
 import os
 import io
 import time
@@ -8,11 +9,21 @@ import requests
 import pandas as pd
 import matplotlib.pyplot as plt
 
-import geopandas as gpd
-from shapely.geometry import Point
-import contextily as cx
-
 import streamlit as st
+
+# ---- OPTIONAL GIS STACK (so the app runs even if shapely/geopandas aren't installed)
+GIS_OK = True
+GIS_ERR = ""
+try:
+    import geopandas as gpd
+    from shapely.geometry import Point
+    import contextily as cx
+except Exception as e:
+    GIS_OK = False
+    GIS_ERR = str(e)
+    gpd = None
+    Point = None
+    cx = None
 
 try:
     from openai import OpenAI
@@ -53,8 +64,17 @@ st.markdown(
 )
 
 st.title("OpenSky Live Snapshot — USFS / CAL FIRE")
-st.markdown('<div class="muted">Queries current OpenSky “states” in a Western US bounding box, matches to your USFS/CALFIRE masterlist, then answers a question (optionally using OpenAI).</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="muted">Queries current OpenSky “states” in a Western US bounding box, matches to your USFS/CALFIRE masterlist, then answers a question (optionally using OpenAI).</div>',
+    unsafe_allow_html=True,
+)
 
+if not GIS_OK:
+    st.warning(
+        "Map rendering dependencies are missing in this environment (geopandas/shapely/contextily). "
+        "The app will still run and show tables + answers. "
+        f"Import error: {GIS_ERR}"
+    )
 
 # =========================
 # CONFIG
@@ -62,11 +82,14 @@ st.markdown('<div class="muted">Queries current OpenSky “states” in a Wester
 BBOX = (31.0, 49.5, -125.0, -102.0)  # (min_lat, max_lat, min_lon, max_lon)
 
 STATES_URL = "https://opensky-network.org/api/states/all"
-TOKEN_URL  = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
+TOKEN_URL = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
 UA = "opensky-live-usfs-calfire/1.0 (+research)"
 
-BASEMAP = cx.providers.Esri.WorldTopoMap
+# Basemap (only used if GIS_OK)
+BASEMAP = None
 BASEMAP_ZOOM = 6
+if GIS_OK:
+    BASEMAP = cx.providers.Esri.WorldTopoMap
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # optional
@@ -78,8 +101,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # optional
 @st.cache_data(show_spinner=False)
 def load_master_from_secrets() -> pd.DataFrame:
     master_csv = st.secrets["masterlist"]["csv"]
-    df = pd.read_csv(io.StringIO(master_csv))
-    return df
+    return pd.read_csv(io.StringIO(master_csv))
 
 def normalize_icao24(x) -> str:
     if pd.isna(x):
@@ -177,17 +199,8 @@ def join_states_master(states_df: pd.DataFrame, master_df: pd.DataFrame) -> pd.D
 
 
 # =========================
-# MAP
+# MAP (optional)
 # =========================
-def to_gdf_webmercator(df: pd.DataFrame) -> gpd.GeoDataFrame:
-    d = df.dropna(subset=["longitude", "latitude"]).copy()
-    gdf = gpd.GeoDataFrame(
-        d,
-        geometry=[Point(xy) for xy in zip(d["longitude"].astype(float), d["latitude"].astype(float))],
-        crs="EPSG:4326",
-    )
-    return gdf.to_crs(epsg=3857)
-
 def bbox_to_webmercator(bbox, pad_frac=0.06):
     min_lat, max_lat, min_lon, max_lon = bbox
     lat_pad = (max_lat - min_lat) * pad_frac
@@ -201,6 +214,15 @@ def bbox_to_webmercator(bbox, pad_frac=0.06):
     p2 = gpd.GeoSeries([Point(max_lon, max_lat)], crs="EPSG:4326").to_crs(epsg=3857).iloc[0]
     return p1.x, p2.x, p1.y, p2.y
 
+def to_gdf_webmercator(df: pd.DataFrame) -> "gpd.GeoDataFrame":
+    d = df.dropna(subset=["longitude", "latitude"]).copy()
+    gdf2 = gpd.GeoDataFrame(
+        d,
+        geometry=[Point(xy) for xy in zip(d["longitude"].astype(float), d["latitude"].astype(float))],
+        crs="EPSG:4326",
+    )
+    return gdf2.to_crs(epsg=3857)
+
 def plot_snapshot_basemap(df: pd.DataFrame, title: str, bbox=None):
     fig, ax = plt.subplots(figsize=(12.5, 8.0))
     ax.set_facecolor("white")
@@ -213,8 +235,8 @@ def plot_snapshot_basemap(df: pd.DataFrame, title: str, bbox=None):
     cx.add_basemap(ax, source=BASEMAP, zoom=BASEMAP_ZOOM, attribution_size=7)
 
     if df is not None and len(df) > 0:
-        gdf = to_gdf_webmercator(df)
-        for agency, g in gdf.groupby("Agency"):
+        gdf2 = to_gdf_webmercator(df)
+        for agency, g in gdf2.groupby("Agency"):
             speed = pd.to_numeric(g["velocity"], errors="coerce").fillna(0.0)
             sizes = (speed.clip(0, 220) / 220.0) * 110.0 + 28.0
             ax.scatter(
@@ -332,7 +354,6 @@ def estimate_openai_cost_usd(model: str, usage_obj) -> dict:
 
 def ask_snapshot_question(snapshot_summary: dict, question: str, map_data_url: str = None) -> tuple[str, dict]:
     if (not OPENAI_API_KEY) or (OpenAI is None):
-        # No OpenAI; return a deterministic summary response
         airborne_total = snapshot_summary.get("airborne_total", 0)
         agencies = snapshot_summary.get("agencies_airborne", {}) or {}
         heli_total = snapshot_summary.get("helicopters_airborne_total", 0)
@@ -407,7 +428,7 @@ with col_a:
     run.markdown("</div>", unsafe_allow_html=True)
 
 with col_b:
-    st.caption("Tip: If you set OPENAI_API_KEY in your environment, the app will answer free-form questions; otherwise it returns a structured summary.")
+    st.caption("Tip: Set OPENAI_API_KEY to enable free-form Q&A; otherwise you get a structured summary.")
 
 
 # =========================
@@ -462,13 +483,17 @@ if go:
             hide_index=True,
         )
 
-    st.markdown("**Map**")
-    title = f"OpenSky CURRENT states | {'WESTERN US bbox' if bbox else 'GLOBAL'} | matched={len(matched)}"
-    fig = plot_snapshot_basemap(matched, title=title, bbox=bbox or BBOX)
-    st.pyplot(fig, use_container_width=True)
+    if GIS_OK:
+        st.markdown("**Map**")
+        title = f"OpenSky CURRENT states | {'WESTERN US bbox' if bbox else 'GLOBAL'} | matched={len(matched)}"
+        fig = plot_snapshot_basemap(matched, title=title, bbox=bbox or BBOX)
+        st.pyplot(fig, use_container_width=True)
 
-    snapshot_summary = summarize_snapshot(matched)
-    map_url = fig_to_data_url(fig)
+        snapshot_summary = summarize_snapshot(matched)
+        map_url = fig_to_data_url(fig)
+    else:
+        snapshot_summary = summarize_snapshot(matched)
+        map_url = None
 
     st.markdown("**Answer**")
     with st.spinner("Answering question..."):
