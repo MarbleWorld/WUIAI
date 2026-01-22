@@ -40,3 +40,4 @@ pyproj
 rasterio
 geopandas
 requests
+contextily
