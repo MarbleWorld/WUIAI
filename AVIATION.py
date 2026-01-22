@@ -353,26 +353,27 @@ def estimate_openai_cost_usd(model: str, usage_obj) -> dict:
     return {"model": model, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens, "estimated_usd": float(est)}
 
 def ask_snapshot_question(snapshot_summary: dict, question: str, map_data_url: str = None) -> tuple[str, dict]:
-    if (not OPENAI_API_KEY) or (OpenAI is None):
-        airborne_total = snapshot_summary.get("airborne_total", 0)
-        agencies = snapshot_summary.get("agencies_airborne", {}) or {}
-        heli_total = snapshot_summary.get("helicopters_airborne_total", 0)
-        heli_by_ag = snapshot_summary.get("helicopters_by_agency", {}) or {}
-        text = (
-            f"Airborne aircraft in matched set: {airborne_total}\n"
-            f"Agencies airborne: {agencies}\n"
-            f"Helicopters airborne (best-effort from Type field): {heli_total}\n"
-            f"Helicopters by agency: {heli_by_ag}\n"
-            f"(Set OPENAI_API_KEY + install openai to enable free-form Q&A.)"
+    # HARD REQUIREMENT
+    if not OPENAI_API_KEY:
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. "
+            "This app is configured to ALWAYS use ChatGPT. "
+            "Add OPENAI_API_KEY to Streamlit secrets or environment variables."
         )
-        return text, {"model": None, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated_usd": 0.0}
+
+    if OpenAI is None:
+        raise RuntimeError(
+            "openai package not installed. "
+            "Add `openai` to requirements.txt."
+        )
 
     client = OpenAI(api_key=OPENAI_API_KEY)
+
     sys_msg = (
         "You are an operational aviation analyst for wildfire response. "
-        "Answer strictly using the provided snapshot summary (and optional map image). "
-        "If helicopter identification is ambiguous, say so explicitly. "
-        "In this dataset, masterlist Type values 'Type1' and 'Type2' indicate helicopters."
+        "You MUST answer the user's question even if the snapshot shows zero aircraft. "
+        "If zero aircraft are airborne, explain why that can occur operationally. "
+        "Do not refuse to answer."
     )
 
     compact = {
@@ -384,18 +385,35 @@ def ask_snapshot_question(snapshot_summary: dict, question: str, map_data_url: s
         "sample_airborne": snapshot_summary.get("sample_airborne", [])[:25],
     }
 
-    user_content = [{"type": "text", "text": f"Snapshot summary (JSON):\n{compact}\n\nQuestion: {question}"}]
+    user_content = [
+        {
+            "type": "text",
+            "text": (
+                "Here is a live aircraft snapshot summary:\n"
+                f"{compact}\n\n"
+                f"Question: {question}\n\n"
+                "If counts are zero, explain plausible operational reasons."
+            ),
+        }
+    ]
+
     if map_data_url is not None:
-        user_content.append({"type": "image_url", "image_url": {"url": map_data_url}})
+        user_content.append(
+            {"type": "image_url", "image_url": {"url": map_data_url}}
+        )
 
     resp = client.chat.completions.create(
         model=OPENAI_MODEL,
-        messages=[{"role": "system", "content": sys_msg}, {"role": "user", "content": user_content}],
+        messages=[
+            {"role": "system", "content": sys_msg},
+            {"role": "user", "content": user_content},
+        ],
         temperature=0,
     )
 
     usage = getattr(resp, "usage", None)
     cost = estimate_openai_cost_usd(OPENAI_MODEL, usage)
+
     return resp.choices[0].message.content.strip(), cost
 
 
@@ -428,7 +446,7 @@ with col_a:
     run.markdown("</div>", unsafe_allow_html=True)
 
 with col_b:
-    st.caption("Tip: Set OPENAI_API_KEY to enable free-form Q&A; otherwise you get a structured summary.")
+    st.caption("HELLO WORLD")
 
 
 # =========================
