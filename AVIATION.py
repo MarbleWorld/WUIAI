@@ -1,4 +1,5 @@
 import os
+import io
 import time
 import base64
 from io import BytesIO
@@ -8,8 +9,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 import geopandas as gpd
-from shapely.geometry import Point, box
+from shapely.geometry import Point
 import contextily as cx
+
+import streamlit as st
 
 try:
     from openai import OpenAI
@@ -18,52 +21,94 @@ except Exception:
 
 
 # =========================
+# STREAMLIT PAGE
+# =========================
+st.set_page_config(page_title="OpenSky USFS/CALFIRE Live Snapshot", layout="wide")
+
+st.markdown(
+    """
+    <style>
+    .big-button button {
+        background: linear-gradient(90deg, #1f2937, #111827);
+        color: white !important;
+        border-radius: 14px;
+        padding: 0.75rem 1.25rem;
+        border: 1px solid rgba(255,255,255,0.15);
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.20);
+        transition: transform 0.06s ease-in-out;
+    }
+    .big-button button:hover {
+        transform: translateY(-1px);
+        border: 1px solid rgba(255,255,255,0.30);
+    }
+    .muted {
+        color: rgba(0,0,0,0.65);
+        font-size: 0.95rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title("OpenSky Live Snapshot — USFS / CAL FIRE")
+st.markdown('<div class="muted">Queries current OpenSky “states” in a Western US bounding box, matches to your USFS/CALFIRE masterlist, then answers a question (optionally using OpenAI).</div>', unsafe_allow_html=True)
+
+
+# =========================
 # CONFIG
 # =========================
-MASTER_XLSX = r"C:\Users\magst\Downloads\ADSBCODE_MASTERLIST_USFSCALFIRE.xlsx"  # change if needed
-
-# Western US bbox (min_lat, max_lat, min_lon, max_lon)
-BBOX = (31.0, 49.5, -125.0, -102.0)
+BBOX = (31.0, 49.5, -125.0, -102.0)  # (min_lat, max_lat, min_lon, max_lon)
 
 STATES_URL = "https://opensky-network.org/api/states/all"
 TOKEN_URL  = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
-
 UA = "opensky-live-usfs-calfire/1.0 (+research)"
 
-# Basemap
 BASEMAP = cx.providers.Esri.WorldTopoMap
 BASEMAP_ZOOM = 6
 
-# OpenAI (optional)
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # optional
 
-# OpenSky OAuth client creds (recommended via env vars)
-# CLIENT_ID = os.getenv("OPENSKY_CLIENT_ID")
-# CLIENT_SECRET = os.getenv("OPENSKY_CLIENT_SECRET")
-CLIENT_ID = "magstadt.shayne@hotmail.com-api-client"
-CLIENT_SECRET = "ELrE549ykC0B26LI1EBoHppXqqi7l5HG"
 
-# -------------------------
-# OPTIONAL BACKGROUND CONTEXT LAYERS (drawn under points)
-# Provide local paths to vector data (SHP / GeoJSON / GPKG etc.)
-BACKGROUND_LAYERS = []
+# =========================
+# MASTERLIST FROM SECRETS
+# =========================
+@st.cache_data(show_spinner=False)
+def load_master_from_secrets() -> pd.DataFrame:
+    master_csv = st.secrets["masterlist"]["csv"]
+    df = pd.read_csv(io.StringIO(master_csv))
+    return df
 
-# Turn off outline + bbox frame (per request)
-SHOW_US_OUTLINE = False
-SHOW_BBOX_FRAME = False
+def normalize_icao24(x) -> str:
+    if pd.isna(x):
+        return ""
+    s = str(x).strip().lower()
+    return s.replace("0x", "").replace(" ", "")
+
+def load_masterlist_df(df: pd.DataFrame) -> pd.DataFrame:
+    expected = {"TailNumber", "ADSB", "Agency"}
+    missing = expected - set(df.columns)
+    if missing:
+        raise RuntimeError(f"Masterlist missing columns: {missing}. Found columns: {list(df.columns)}")
+
+    df = df.copy()
+    df["icao24"] = df["ADSB"].apply(normalize_icao24)
+    df = df[df["icao24"] != ""].drop_duplicates(subset=["icao24"]).reset_index(drop=True)
+
+    df["Agency"] = df["Agency"].astype(str).str.strip().str.upper()
+    if "Type" in df.columns:
+        df["Type"] = df["Type"].astype(str).str.strip()
+    else:
+        df["Type"] = ""
+    return df
 
 
 # =========================
-# AUTH
+# AUTH (OpenSky)
 # =========================
 def get_access_token(client_id: str, client_secret: str, timeout=30) -> str:
-    if not (client_id and client_secret):
-        raise RuntimeError(
-            "Missing OPENSKY_CLIENT_ID / OPENSKY_CLIENT_SECRET environment variables.\n"
-            "Set them (recommended) or pass them in explicitly."
-        )
-
     r = requests.post(
         TOKEN_URL,
         headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": UA},
@@ -74,10 +119,8 @@ def get_access_token(client_id: str, client_secret: str, timeout=30) -> str:
         },
         timeout=timeout,
     )
-
     if r.status_code == 403:
         raise RuntimeError("403 from token endpoint.\n" + r.text[:800])
-
     r.raise_for_status()
     tok = r.json()
     access_token = tok.get("access_token")
@@ -94,7 +137,6 @@ def fetch_states(token: str, bbox=None, timeout=30) -> dict:
     if bbox is not None:
         min_lat, max_lat, min_lon, max_lon = bbox
         params.update({"lamin": min_lat, "lamax": max_lat, "lomin": min_lon, "lomax": max_lon})
-
     r = requests.get(
         STATES_URL,
         headers={"Authorization": f"Bearer {token}", "User-Agent": UA},
@@ -108,31 +150,6 @@ def fetch_states(token: str, bbox=None, timeout=30) -> dict:
 # =========================
 # DATA WRANGLING
 # =========================
-def normalize_icao24(x) -> str:
-    if pd.isna(x):
-        return ""
-    s = str(x).strip().lower()
-    return s.replace("0x", "").replace(" ", "")
-
-def load_masterlist(path: str) -> pd.DataFrame:
-    df = pd.read_excel(path)
-    expected = {"TailNumber", "ADSB", "Agency"}
-    missing = expected - set(df.columns)
-    if missing:
-        raise RuntimeError(f"Masterlist missing columns: {missing}. Found columns: {list(df.columns)}")
-
-    df = df.copy()
-    df["icao24"] = df["ADSB"].apply(normalize_icao24)
-    df = df[df["icao24"] != ""].drop_duplicates(subset=["icao24"]).reset_index(drop=True)
-
-    df["Agency"] = df["Agency"].astype(str).str.strip().str.upper()
-    if "Type" in df.columns:
-        df["Type"] = df["Type"].astype(str).str.strip()
-    else:
-        df["Type"] = ""
-
-    return df
-
 def states_to_df(data: dict) -> pd.DataFrame:
     cols = [
         "icao24", "callsign", "origin_country", "time_position", "last_contact",
@@ -158,6 +175,10 @@ def join_states_master(states_df: pd.DataFrame, master_df: pd.DataFrame) -> pd.D
     out["alt_m"] = out["geo_altitude"].fillna(out["baro_altitude"])
     return out
 
+
+# =========================
+# MAP
+# =========================
 def to_gdf_webmercator(df: pd.DataFrame) -> gpd.GeoDataFrame:
     d = df.dropna(subset=["longitude", "latitude"]).copy()
     gdf = gpd.GeoDataFrame(
@@ -180,118 +201,16 @@ def bbox_to_webmercator(bbox, pad_frac=0.06):
     p2 = gpd.GeoSeries([Point(max_lon, max_lat)], crs="EPSG:4326").to_crs(epsg=3857).iloc[0]
     return p1.x, p2.x, p1.y, p2.y
 
-def classify_airframe_is_heli(type_str: str, callsign: str = "") -> bool:
-    t = (type_str or "").strip().lower()
-    c = (callsign or "").strip().lower()
-    if any(k in t for k in ["heli", "helic", "rotor", "rotary"]):
-        return True
-    if t in {"h", "hel", "heli"}:
-        return True
-    if t.startswith("h ") or t.endswith(" h") or t.startswith("h-") or t.startswith("h_"):
-        return True
-    if t.replace("-", " ").replace("_", " ").strip() in {"type 1", "type1", "type 2", "type2"}:
-        return True
-    return False
-
-def summarize_snapshot(matched: pd.DataFrame) -> dict:
-    if matched is None or matched.empty:
-        return {
-            "matched_total": 0,
-            "airborne_total": 0,
-            "agencies_airborne": {},
-            "helicopters_airborne_total": 0,
-            "helicopters_by_agency": {},
-            "note": "No matches in snapshot.",
-        }
-
-    m = matched.copy()
-    m["Agency"] = m["Agency"].astype(str).str.strip().str.upper()
-    m["is_airborne"] = (~m["on_ground"].fillna(False)).astype(bool)
-
-    airborne = m[m["is_airborne"]].copy()
-
-    agencies_airborne = airborne["Agency"].value_counts().to_dict() if not airborne.empty else {}
-    airborne_total = int(len(airborne))
-
-    airborne["is_heli"] = [
-        classify_airframe_is_heli(t, cs) for t, cs in zip(airborne.get("Type", ""), airborne.get("callsign", ""))
-    ]
-    helis = airborne[airborne["is_heli"]].copy()
-
-    return {
-        "matched_total": int(len(m)),
-        "airborne_total": airborne_total,
-        "agencies_airborne": agencies_airborne,
-        "helicopters_airborne_total": int(len(helis)),
-        "helicopters_by_agency": helis["Agency"].value_counts().to_dict() if not helis.empty else {},
-        "sample_airborne": airborne[["Agency", "TailNumber", "icao24", "callsign", "Type", "latitude", "longitude", "alt_m", "velocity", "on_ground"]]
-            .sort_values(["Agency", "TailNumber"]).head(25).to_dict(orient="records") if not airborne.empty else [],
-    }
-
-
-# =========================
-# BACKGROUND LAYER HELPERS
-# =========================
-def _safe_read_vector(path: str) -> gpd.GeoDataFrame:
-    g = gpd.read_file(path)
-    if g.empty:
-        return g
-    if g.crs is None:
-        g = g.set_crs("EPSG:4326", allow_override=True)
-    return g.to_crs(epsg=3857)
-
-def _plot_background_layers(ax, layers):
-    for layer in (layers or []):
-        p = layer.get("path")
-        if not p:
-            continue
-        try:
-            g = _safe_read_vector(p)
-            if g is None or g.empty:
-                continue
-
-            edgecolor = layer.get("edgecolor", "black")
-            facecolor = layer.get("facecolor", "none")
-            alpha = float(layer.get("alpha", 0.7))
-            linewidth = float(layer.get("linewidth", 1.0))
-            zorder = int(layer.get("zorder", 5))
-
-            g.plot(
-                ax=ax,
-                edgecolor=edgecolor,
-                facecolor=facecolor,
-                alpha=alpha,
-                linewidth=linewidth,
-                zorder=zorder,
-            )
-        except Exception as e:
-            print(f"[WARN] Failed to draw background layer '{p}': {e}")
-
-
-# =========================
-# PLOT (ALWAYS BASEMAP + OPTIONAL BACKGROUND)
-# =========================
-def plot_snapshot_basemap(df: pd.DataFrame, title: str, bbox=None, save_png=None):
-    fig, ax = plt.subplots(figsize=(12.5, 8.5))
+def plot_snapshot_basemap(df: pd.DataFrame, title: str, bbox=None):
+    fig, ax = plt.subplots(figsize=(12.5, 8.0))
     ax.set_facecolor("white")
 
     if bbox is not None:
         minx, maxx, miny, maxy = bbox_to_webmercator(bbox, pad_frac=0.06)
         ax.set_xlim(minx, maxx)
         ax.set_ylim(miny, maxy)
-    else:
-        if df is None or len(df) == 0:
-            ax.set_xlim(-1.45e7, -1.05e7)
-            ax.set_ylim(3.7e6, 6.2e6)
-        else:
-            gtmp = to_gdf_webmercator(df)
-            ax.set_xlim(gtmp.geometry.x.min(), gtmp.geometry.x.max())
-            ax.set_ylim(gtmp.geometry.y.min(), gtmp.geometry.y.max())
 
     cx.add_basemap(ax, source=BASEMAP, zoom=BASEMAP_ZOOM, attribution_size=7)
-
-    if BACKGROUND_LAYERS:
-        _plot_background_layers(ax, BACKGROUND_LAYERS)
 
     if df is not None and len(df) > 0:
         gdf = to_gdf_webmercator(df)
@@ -321,12 +240,7 @@ def plot_snapshot_basemap(df: pd.DataFrame, title: str, bbox=None, save_png=None
     ax.set_title(title)
     ax.set_axis_off()
     plt.tight_layout()
-
-    if save_png:
-        plt.savefig(save_png, dpi=160, bbox_inches="tight")
-    plt.show()
     return fig
-
 
 def fig_to_data_url(fig) -> str:
     buf = BytesIO()
@@ -336,29 +250,66 @@ def fig_to_data_url(fig) -> str:
     return "data:image/png;base64," + b64
 
 
-
 # =========================
-# COST ESTIMATION (OpenAI)
+# SUMMARY + QUESTION ANSWERING
 # =========================
+def classify_airframe_is_heli(type_str: str, callsign: str = "") -> bool:
+    t = (type_str or "").strip().lower()
+    c = (callsign or "").strip().lower()
+    if any(k in t for k in ["heli", "helic", "rotor", "rotary"]):
+        return True
+    if t in {"h", "hel", "heli"}:
+        return True
+    if t.startswith("h ") or t.endswith(" h") or t.startswith("h-") or t.startswith("h_"):
+        return True
+    if t.replace("-", " ").replace("_", " ").strip() in {"type 1", "type1", "type 2", "type2"}:
+        return True
+    return False
 
-# Current token pricing (USD per 1M tokens) — update if you switch models.
-# Source: OpenAI model pricing pages (GPT-4o: $2.50 in / $10.00 out per 1M tokens).
+def summarize_snapshot(matched: pd.DataFrame) -> dict:
+    if matched is None or matched.empty:
+        return {
+            "matched_total": 0,
+            "airborne_total": 0,
+            "agencies_airborne": {},
+            "helicopters_airborne_total": 0,
+            "helicopters_by_agency": {},
+            "note": "No matches in snapshot.",
+        }
+
+    m = matched.copy()
+    m["Agency"] = m["Agency"].astype(str).str.strip().str.upper()
+    m["is_airborne"] = (~m["on_ground"].fillna(False)).astype(bool)
+
+    airborne = m[m["is_airborne"]].copy()
+    agencies_airborne = airborne["Agency"].value_counts().to_dict() if not airborne.empty else {}
+
+    airborne["is_heli"] = [
+        classify_airframe_is_heli(t, cs) for t, cs in zip(airborne.get("Type", ""), airborne.get("callsign", ""))
+    ]
+    helis = airborne[airborne["is_heli"]].copy()
+
+    return {
+        "matched_total": int(len(m)),
+        "airborne_total": int(len(airborne)),
+        "agencies_airborne": agencies_airborne,
+        "helicopters_airborne_total": int(len(helis)),
+        "helicopters_by_agency": helis["Agency"].value_counts().to_dict() if not helis.empty else {},
+        "sample_airborne": airborne[
+            ["Agency", "TailNumber", "icao24", "callsign", "Type", "latitude", "longitude", "alt_m", "velocity", "on_ground"]
+        ].sort_values(["Agency", "TailNumber"]).head(25).to_dict(orient="records") if not airborne.empty else [],
+    }
+
 OPENAI_PRICING_PER_1M = {
     "gpt-4o": {"in": 2.50, "out": 10.00},
-    # Optional: if you ever use these model names
     "gpt-4o-2024-08-06": {"in": 2.50, "out": 10.00},
     "chatgpt-4o-latest": {"in": 5.00, "out": 15.00},
 }
 
 def estimate_openai_cost_usd(model: str, usage_obj) -> dict:
-    """
-    Estimate cost from OpenAI Chat Completions response usage.
-    Returns dict with tokens + estimated USD.
-    """
     if usage_obj is None:
         return {"model": model, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated_usd": 0.0}
 
-    # usage can be a pydantic object or dict-like; handle both
     prompt_tokens = getattr(usage_obj, "prompt_tokens", None)
     completion_tokens = getattr(usage_obj, "completion_tokens", None)
     total_tokens = getattr(usage_obj, "total_tokens", None)
@@ -372,54 +323,35 @@ def estimate_openai_cost_usd(model: str, usage_obj) -> dict:
     completion_tokens = int(completion_tokens or 0)
     total_tokens = int(total_tokens or (prompt_tokens + completion_tokens))
 
-    rates = OPENAI_PRICING_PER_1M.get(model, None)
+    rates = OPENAI_PRICING_PER_1M.get(model)
     if rates is None:
-        # Unknown model pricing; report tokens but do not guess dollars.
-        return {
-            "model": model,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-            "estimated_usd": None,
-            "note": f"No pricing entry for model '{model}'. Add it to OPENAI_PRICING_PER_1M.",
-        }
+        return {"model": model, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens, "estimated_usd": None}
 
     est = (prompt_tokens / 1_000_000.0) * rates["in"] + (completion_tokens / 1_000_000.0) * rates["out"]
-    return {
-        "model": model,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": total_tokens,
-        "estimated_usd": float(est),
-    }
+    return {"model": model, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens, "estimated_usd": float(est)}
 
-
-# =========================
-# PATCH: in ask_snapshot_question()
-# =========================
-# Replace the end of your ask_snapshot_question() with this version of the API call + prints:
-
-def ask_snapshot_question(snapshot_summary: dict, question: str, map_data_url: str = None) -> str:
+def ask_snapshot_question(snapshot_summary: dict, question: str, map_data_url: str = None) -> tuple[str, dict]:
     if (not OPENAI_API_KEY) or (OpenAI is None):
+        # No OpenAI; return a deterministic summary response
         airborne_total = snapshot_summary.get("airborne_total", 0)
         agencies = snapshot_summary.get("agencies_airborne", {}) or {}
         heli_total = snapshot_summary.get("helicopters_airborne_total", 0)
         heli_by_ag = snapshot_summary.get("helicopters_by_agency", {}) or {}
-        return (
+        text = (
             f"Airborne aircraft in matched set: {airborne_total}\n"
             f"Agencies airborne: {agencies}\n"
-            f"Helicopters airborne (best-effort from masterlist Type): {heli_total}\n"
+            f"Helicopters airborne (best-effort from Type field): {heli_total}\n"
             f"Helicopters by agency: {heli_by_ag}\n"
             f"(Set OPENAI_API_KEY + install openai to enable free-form Q&A.)"
         )
+        return text, {"model": None, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "estimated_usd": 0.0}
 
     client = OpenAI(api_key=OPENAI_API_KEY)
-
     sys_msg = (
         "You are an operational aviation analyst for wildfire response. "
         "Answer strictly using the provided snapshot summary (and optional map image). "
         "If helicopter identification is ambiguous, say so explicitly. "
-        "In this dataset, masterlist Type values 'Type 1' and 'Type 2' indicate helicopters."
+        "In this dataset, masterlist Type values 'Type1' and 'Type2' indicate helicopters."
     )
 
     compact = {
@@ -437,134 +369,114 @@ def ask_snapshot_question(snapshot_summary: dict, question: str, map_data_url: s
 
     resp = client.chat.completions.create(
         model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": sys_msg},
-            {"role": "user", "content": user_content},
-        ],
-        temperature=0,
-    )
-
-    # ---- PRINT COST ESTIMATE
-    usage = getattr(resp, "usage", None)
-    cost = estimate_openai_cost_usd(OPENAI_MODEL, usage)
-    print("\n=== OPENAI COST ESTIMATE ===")
-    print(f"Model: {cost.get('model')}")
-    print(f"prompt_tokens: {cost.get('prompt_tokens')} | completion_tokens: {cost.get('completion_tokens')} | total_tokens: {cost.get('total_tokens')}")
-    if cost.get("estimated_usd") is None:
-        print(f"estimated_usd: (unknown)  note: {cost.get('note')}")
-    else:
-        print(f"estimated_usd: ${cost.get('estimated_usd'):.6f}")
-
-    return resp.choices[0].message.content.strip()
-
-
-
-
-
-# =========================
-# SNAPSHOT Q&A
-# =========================
-def ask_snapshot_question(snapshot_summary: dict, question: str, map_data_url: str = None) -> str:
-    # Force visibility of why you're not seeing cost
-    print(f"[DEBUG] OPENAI_API_KEY set? {bool(OPENAI_API_KEY)} | OpenAI import ok? {OpenAI is not None} | model={OPENAI_MODEL}")
-
-    if (not OPENAI_API_KEY) or (OpenAI is None):
-        airborne_total = snapshot_summary.get("airborne_total", 0)
-        agencies = snapshot_summary.get("agencies_airborne", {}) or {}
-        heli_total = snapshot_summary.get("helicopters_airborne_total", 0)
-        heli_by_ag = snapshot_summary.get("helicopters_by_agency", {}) or {}
-        return (
-            f"Airborne aircraft in matched set: {airborne_total}\n"
-            f"Agencies airborne: {agencies}\n"
-            f"Helicopters airborne (best-effort from masterlist Type): {heli_total}\n"
-            f"Helicopters by agency: {heli_by_ag}\n"
-            f"(Set OPENAI_API_KEY + install openai to enable free-form Q&A.)"
-        )
-
-    client = OpenAI(api_key=OPENAI_API_KEY)
-
-    sys_msg = (
-        "You are an operational aviation analyst for wildfire response. "
-        "Answer strictly using the provided snapshot summary (and optional map image). "
-        "If helicopter identification is ambiguous, say so explicitly. "
-        "In this dataset, masterlist Type values 'Type 1' and 'Type 2' indicate helicopters."
-    )
-
-    compact = {
-        "matched_total": snapshot_summary.get("matched_total", 0),
-        "airborne_total": snapshot_summary.get("airborne_total", 0),
-        "agencies_airborne": snapshot_summary.get("agencies_airborne", {}),
-        "helicopters_airborne_total": snapshot_summary.get("helicopters_airborne_total", 0),
-        "helicopters_by_agency": snapshot_summary.get("helicopters_by_agency", {}),
-        "sample_airborne": snapshot_summary.get("sample_airborne", [])[:25],
-    }
-
-    user_content = [{"type": "text", "text": f"Snapshot summary (JSON):\n{compact}\n\nQuestion: {question}"}]
-    if map_data_url is not None:
-        user_content.append({"type": "image_url", "image_url": {"url": map_data_url}})
-
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": sys_msg},
-            {"role": "user", "content": user_content},
-        ],
+        messages=[{"role": "system", "content": sys_msg}, {"role": "user", "content": user_content}],
         temperature=0,
     )
 
     usage = getattr(resp, "usage", None)
     cost = estimate_openai_cost_usd(OPENAI_MODEL, usage)
-
-    print("\n=== OPENAI COST ESTIMATE ===")
-    print(f"Model: {cost.get('model')}")
-    print(f"prompt_tokens: {cost.get('prompt_tokens')} | completion_tokens: {cost.get('completion_tokens')} | total_tokens: {cost.get('total_tokens')}")
-    if cost.get("estimated_usd") is None:
-        print(f"estimated_usd: (unknown)  note: {cost.get('note')}")
-    else:
-        print(f"estimated_usd: ${cost.get('estimated_usd'):.6f}")
-
-    return resp.choices[0].message.content.strip()
+    return resp.choices[0].message.content.strip(), cost
 
 
 # =========================
-# MAIN
+# UI CONTROLS
 # =========================
-def main(question: str = "How many helicopters and what agencies are currently in the air?"):
+with st.sidebar:
+    st.header("Settings")
+    st.caption("Put OpenSky OAuth and masterlist CSV in Streamlit secrets.")
+
+    bbox_on = st.checkbox("Use Western US bbox", value=True)
+    bbox = BBOX if bbox_on else None
+
+    agencies_filter = st.multiselect("Agencies to display", ["USFS", "CALFIRE"], default=["USFS", "CALFIRE"])
+
+    st.markdown("---")
+    st.subheader("OpenSky credentials (from secrets)")
+    st.caption("Expected: st.secrets['opensky']['client_id'] and ['client_secret']")
+
+question = st.text_input(
+    "Ask a question about the CURRENT aircraft snapshot:",
+    value="How many helicopters are in the air and what agencies are they from?",
+)
+
+col_a, col_b = st.columns([0.22, 0.78], vertical_alignment="bottom")
+with col_a:
+    run = st.container()
+    run.markdown('<div class="big-button">', unsafe_allow_html=True)
+    go = st.button("Run snapshot", use_container_width=True)
+    run.markdown("</div>", unsafe_allow_html=True)
+
+with col_b:
+    st.caption("Tip: If you set OPENAI_API_KEY in your environment, the app will answer free-form questions; otherwise it returns a structured summary.")
+
+
+# =========================
+# RUN
+# =========================
+if go:
     t0 = time.time()
 
-    master = load_masterlist(MASTER_XLSX)
-    token = get_access_token(CLIENT_ID, CLIENT_SECRET)
-    data = fetch_states(token, bbox=BBOX)
+    try:
+        client_id = st.secrets["opensky"]["client_id"]
+        client_secret = st.secrets["opensky"]["client_secret"]
+    except Exception:
+        st.error("Missing OpenSky credentials in secrets. Add [opensky] client_id and client_secret.")
+        st.stop()
+
+    with st.spinner("Loading masterlist..."):
+        master_raw = load_master_from_secrets()
+        master = load_masterlist_df(master_raw)
+
+    with st.spinner("Fetching current OpenSky states..."):
+        token = get_access_token(client_id, client_secret)
+        data = fetch_states(token, bbox=bbox)
 
     states = states_to_df(data)
     matched = join_states_master(states, master)
 
+    if agencies_filter:
+        matched = matched[matched["Agency"].astype(str).str.upper().isin([a.upper() for a in agencies_filter])].copy()
+
     api_time = data.get("time")
-    print(f"OpenSky api_time={api_time} | bbox={BBOX if BBOX else 'global'}")
-    print(f"Masterlist aircraft: {len(master)} | Matched in snapshot: {len(matched)}")
+    elapsed = time.time() - t0
+
+    st.subheader("Snapshot results")
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Masterlist aircraft", f"{len(master):,}")
+    k2.metric("Matched in snapshot", f"{len(matched):,}")
+    k3.metric("API time (epoch)", str(api_time))
+    k4.metric("Fetch + render", f"{elapsed:.2f}s")
 
     if matched.empty:
-        print("\nCounts by Agency:\n(none)")
-        print("\nSample rows:\n(none)")
+        st.warning("No matching USFS/CALFIRE aircraft found in this snapshot.")
     else:
-        print("\nCounts by Agency:")
-        print(matched["Agency"].value_counts(dropna=False).to_string())
+        st.markdown("**Counts by agency**")
+        st.dataframe(matched["Agency"].value_counts(dropna=False).rename_axis("Agency").reset_index(name="Count"), use_container_width=True)
 
+        st.markdown("**Sample matched rows**")
         show_cols = ["Agency", "TailNumber", "icao24", "callsign", "Type", "latitude", "longitude", "alt_m", "velocity", "on_ground"]
-        print("\nSample rows:")
-        print(matched[show_cols].sort_values(["Agency", "TailNumber"]).head(25).to_string(index=False))
+        st.dataframe(
+            matched[show_cols].sort_values(["Agency", "TailNumber"]).head(100),
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    title = f"OpenSky CURRENT states | WESTERN US | matched={len(matched)} | fetched_in={time.time()-t0:.2f}s"
-    fig = plot_snapshot_basemap(matched, title=title, bbox=BBOX, save_png=None)
+    st.markdown("**Map**")
+    title = f"OpenSky CURRENT states | {'WESTERN US bbox' if bbox else 'GLOBAL'} | matched={len(matched)}"
+    fig = plot_snapshot_basemap(matched, title=title, bbox=bbox or BBOX)
+    st.pyplot(fig, use_container_width=True)
 
     snapshot_summary = summarize_snapshot(matched)
     map_url = fig_to_data_url(fig)
 
-    answer = ask_snapshot_question(snapshot_summary, question=question, map_data_url=map_url)
-    print("\n=== SNAPSHOT Q&A ===")
-    print("Q:", question)
-    print("A:", answer)
+    st.markdown("**Answer**")
+    with st.spinner("Answering question..."):
+        answer, cost = ask_snapshot_question(snapshot_summary, question=question, map_data_url=map_url)
 
+    st.write(answer)
 
-if __name__ == "__main__":
-    main(question="How amny hilcopter are inthe ari and tell me the states they are in  ")
+    if cost.get("model"):
+        st.caption(
+            f"OpenAI usage: model={cost.get('model')} | prompt={cost.get('prompt_tokens')} | completion={cost.get('completion_tokens')} | total={cost.get('total_tokens')} | est=${(cost.get('estimated_usd') or 0):.6f}"
+        )
