@@ -465,10 +465,15 @@ if go:
         st.error("Missing OpenSky credentials in secrets. Add [opensky] client_id and client_secret.")
         st.stop()
 
-    with st.spinner("Loading masterlist..."):
-        master_raw = load_master_from_secrets()
-        master = load_masterlist_df(master_raw)
+    # with st.spinner("Loading masterlist..."):
+    #     master_raw = load_master_from_secrets()
+    #     master = load_masterlist_df(master_raw)
 
+    with st.spinner("Loading masterlist..."):
+        master_csv = st.secrets["masterlist"]["csv"]
+        master_raw = load_master_from_text(master_csv)
+        master = load_masterlist_df(master_raw)
+    
     with st.spinner("Fetching current OpenSky states..."):
         token = get_access_token(client_id, client_secret)
         data = fetch_states(token, bbox=bbox)
