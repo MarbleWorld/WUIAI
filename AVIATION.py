@@ -92,7 +92,7 @@ if GIS_OK:
     BASEMAP = cx.providers.Esri.WorldTopoMap
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # optional
+OPENAI_API_KEY = st.secrets.get("openai", {}).get("api_key") or os.getenv("OPENAI_API_KEY")
 
 
 # =========================
