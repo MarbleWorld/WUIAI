@@ -99,9 +99,12 @@ OPENAI_API_KEY = st.secrets.get("openai", {}).get("api_key") or os.getenv("OPENA
 # MASTERLIST FROM SECRETS
 # =========================
 @st.cache_data(show_spinner=False)
-def load_master_from_secrets() -> pd.DataFrame:
-    master_csv = st.secrets["masterlist"]["csv"]
+def load_master_from_text(master_csv: str) -> pd.DataFrame:
     return pd.read_csv(io.StringIO(master_csv))
+
+# usage
+master_csv = st.secrets["masterlist"]["csv"]
+master_raw = load_master_from_text(master_csv)
 
 def normalize_icao24(x) -> str:
     if pd.isna(x):
