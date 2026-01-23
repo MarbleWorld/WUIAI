@@ -372,7 +372,7 @@ def ask_snapshot_question(snapshot_summary: dict, question: str, map_data_url: s
     sys_msg = (
         "You are an operational aviation analyst for wildfire response. "
         "You MUST answer the user's question even if the snapshot shows zero aircraft. "
-        "If zero aircraft are airborne, explain why that can occur operationally. "
+        #"If zero aircraft are airborne, explain why that can occur operationally. "
         "Do not refuse to answer."
     )
 
@@ -392,7 +392,7 @@ def ask_snapshot_question(snapshot_summary: dict, question: str, map_data_url: s
                 "Here is a live aircraft snapshot summary:\n"
                 f"{compact}\n\n"
                 f"Question: {question}\n\n"
-                "If counts are zero, explain plausible operational reasons."
+                "If counts are zero, just answer based on their question"
             ),
         }
     ]
