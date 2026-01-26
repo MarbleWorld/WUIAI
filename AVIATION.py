@@ -1094,11 +1094,6 @@
 
 
 
-
-
-
-
-
 # AVIATION.py
 import os
 import io
@@ -1140,7 +1135,7 @@ except Exception:
 # =========================
 st.set_page_config(page_title="OpenSky USFS/CALFIRE Live Snapshot", layout="wide")
 
-# Hide the sidebar entirely + Streamlit chrome (menu/footer/header)
+# Hide sidebar + Streamlit chrome
 st.markdown(
     """
     <style>
@@ -1194,13 +1189,12 @@ if not GIS_OK:
         f"Import error: {GIS_ERR}"
     )
 
+
 # =========================
 # CONFIG
 # =========================
 BBOX = (31.0, 49.5, -125.0, -102.0)  # (min_lat, max_lat, min_lon, max_lon)
-
 STATES_URL = "https://opensky-network.org/api/states/all"
-TOKEN_URL = "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
 UA = "opensky-live-usfs-calfire/1.0 (+research)"
 
 # Basemap (only used if GIS_OK)
@@ -1212,11 +1206,10 @@ if GIS_OK:
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 OPENAI_API_KEY = st.secrets.get("openai", {}).get("api_key") or os.getenv("OPENAI_API_KEY")
 
-# Hardcoded (no sidebar)
 bbox = BBOX
 agencies_filter = ["USFS", "CALFIRE"]
 
-# Network timeouts (connect, read)
+# Requests timeout: (connect, read)
 HTTP_TIMEOUT = (8, 45)
 
 
@@ -1232,7 +1225,7 @@ def http_session() -> requests.Session:
         read=4,
         backoff_factor=0.8,
         status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset(["GET", "POST"]),
+        allowed_methods=frozenset(["GET"]),
         raise_on_status=False,
     )
     adapter = HTTPAdapter(max_retries=retry)
@@ -1273,58 +1266,23 @@ def load_masterlist_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================
-# AUTH (OpenSky)
+# FETCH (Basic Auth only)
 # =========================
-def get_access_token(client_id: str, client_secret: str, timeout=HTTP_TIMEOUT) -> str:
-    sess = http_session()
-    try:
-        r = sess.post(
-            TOKEN_URL,
-            headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": UA},
-            data={
-                "grant_type": "client_credentials",
-                "client_id": client_id,
-                "client_secret": client_secret,
-            },
-            timeout=timeout,
-        )
-    except requests.exceptions.ConnectTimeout as e:
-        raise RuntimeError(
-            f"ConnectTimeout to OpenSky token endpoint: {TOKEN_URL}. "
-            "If this happens on Streamlit Cloud, configure Basic Auth fallback (opensky username/password) "
-            "or deploy somewhere with reliable egress to OpenSky."
-        ) from e
+def fetch_states_basic_auth(bbox=None, username=None, password=None, timeout=HTTP_TIMEOUT) -> dict:
+    if not username or not password:
+        raise RuntimeError("Missing OpenSky Basic Auth credentials. Add opensky.username and opensky.password to secrets.")
 
-    if r.status_code == 403:
-        raise RuntimeError("403 from token endpoint.\n" + (r.text or "")[:800])
-
-    r.raise_for_status()
-    tok = r.json()
-    access_token = tok.get("access_token")
-    if not access_token:
-        raise RuntimeError(f"Token response missing access_token: {tok}")
-    return access_token
-
-
-# =========================
-# FETCH (OpenSky states)
-# =========================
-def fetch_states(bbox=None, token=None, basic_auth=None, timeout=HTTP_TIMEOUT) -> dict:
-    sess = http_session()
     params = {}
     if bbox is not None:
         min_lat, max_lat, min_lon, max_lon = bbox
         params.update({"lamin": min_lat, "lamax": max_lat, "lomin": min_lon, "lomax": max_lon})
 
-    headers = {"User-Agent": UA}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
+    sess = http_session()
     r = sess.get(
         STATES_URL,
-        headers=headers,
+        headers={"User-Agent": UA},
         params=params,
-        auth=basic_auth,  # tuple (username, password) or None
+        auth=(username, password),
         timeout=timeout,
     )
     r.raise_for_status()
@@ -1519,9 +1477,13 @@ def estimate_openai_cost_usd(model: str, usage_obj) -> dict:
 
 def ask_snapshot_question(snapshot_summary: dict, question: str, map_data_url: str = None) -> tuple[str, dict]:
     if not OPENAI_API_KEY:
-        raise RuntimeError(
-            "OPENAI_API_KEY is not set. "
-            "Add OPENAI_API_KEY to Streamlit secrets or environment variables."
+        return (
+            "OPENAI_API_KEY not set. Showing deterministic summary only:\n\n"
+            f"Airborne matched aircraft: {snapshot_summary.get('airborne_total', 0)}\n"
+            f"Agencies airborne: {snapshot_summary.get('agencies_airborne', {})}\n"
+            f"Helicopters airborne (best-effort): {snapshot_summary.get('helicopters_airborne_total', 0)}\n"
+            f"Helicopters by agency: {snapshot_summary.get('helicopters_by_agency', {})}\n",
+            {"model": None},
         )
 
     if OpenAI is None:
@@ -1544,18 +1506,7 @@ def ask_snapshot_question(snapshot_summary: dict, question: str, map_data_url: s
         "sample_airborne": snapshot_summary.get("sample_airborne", [])[:25],
     }
 
-    user_content = [
-        {
-            "type": "text",
-            "text": (
-                "Here is a live aircraft snapshot summary:\n"
-                f"{compact}\n\n"
-                f"Question: {question}\n\n"
-                "If counts are zero, just answer based on their question"
-            ),
-        }
-    ]
-
+    user_content = [{"type": "text", "text": f"Snapshot summary:\n{compact}\n\nQuestion: {question}"}]
     if map_data_url is not None:
         user_content.append({"type": "image_url", "image_url": {"url": map_data_url}})
 
@@ -1570,12 +1521,11 @@ def ask_snapshot_question(snapshot_summary: dict, question: str, map_data_url: s
 
     usage = getattr(resp, "usage", None)
     cost = estimate_openai_cost_usd(OPENAI_MODEL, usage)
-
     return resp.choices[0].message.content.strip(), cost
 
 
 # =========================
-# UI CONTROLS (no sidebar)
+# UI CONTROLS
 # =========================
 question = st.text_input(
     "Ask a question about the CURRENT aircraft snapshot:",
@@ -1588,7 +1538,6 @@ with col_a:
     run.markdown('<div class="big-button">', unsafe_allow_html=True)
     go = st.button("Run snapshot", use_container_width=True)
     run.markdown("</div>", unsafe_allow_html=True)
-
 with col_b:
     st.caption("")
 
@@ -1599,45 +1548,24 @@ with col_b:
 if go:
     t0 = time.time()
 
+    # Required: OpenSky Basic Auth
     try:
-        client_id = st.secrets["opensky"]["client_id"]
-        client_secret = st.secrets["opensky"]["client_secret"]
+        os_user = st.secrets["opensky"]["username"]
+        os_pass = st.secrets["opensky"]["password"]
     except Exception:
-        st.error("Missing OpenSky credentials in secrets. Add [opensky] client_id and client_secret.")
+        st.error("Missing OpenSky Basic Auth in secrets. Add [opensky] username and password.")
         st.stop()
-
-    # Optional Basic Auth fallback for /states/all
-    basic_auth = None
-    if "username" in st.secrets.get("opensky", {}) and "password" in st.secrets.get("opensky", {}):
-        basic_auth = (st.secrets["opensky"]["username"], st.secrets["opensky"]["password"])
 
     with st.spinner("Loading masterlist..."):
         master_csv = st.secrets["masterlist"]["csv"]
         master_raw = load_master_from_text(master_csv)
         master = load_masterlist_df(master_raw)
 
-    with st.spinner("Fetching current OpenSky states..."):
-        token = None
-        token_err = None
+    with st.spinner("Fetching current OpenSky states (Basic Auth)..."):
         try:
-            token = get_access_token(client_id, client_secret)
+            data = fetch_states_basic_auth(bbox=bbox, username=os_user, password=os_pass)
         except Exception as e:
-            token_err = str(e)
-
-        try:
-            if token:
-                data = fetch_states(bbox=bbox, token=token, basic_auth=None)
-            elif basic_auth is not None:
-                st.warning("OAuth token fetch failed; falling back to Basic Auth for OpenSky states.")
-                data = fetch_states(bbox=bbox, token=None, basic_auth=basic_auth)
-            else:
-                st.error(
-                    "OpenSky OAuth token fetch failed and no Basic Auth fallback is configured.\n\n"
-                    f"OAuth error:\n{token_err}"
-                )
-                st.stop()
-        except Exception as e:
-            st.error(f"OpenSky request failed: {e}\n\nOAuth error (earlier): {token_err or '(none)'}")
+            st.error(f"OpenSky states request failed: {e}")
             st.stop()
 
     states = states_to_df(data)
@@ -1679,7 +1607,6 @@ if go:
         title = f"OpenSky CURRENT states | WESTERN US bbox | matched={len(matched)}"
         fig = plot_snapshot_basemap(matched, title=title, bbox=bbox)
         st.pyplot(fig, use_container_width=True)
-
         snapshot_summary = summarize_snapshot(matched)
         map_url = fig_to_data_url(fig)
     else:
@@ -1694,7 +1621,9 @@ if go:
 
     if cost.get("model"):
         st.caption(
-            f"OpenAI usage: model={cost.get('model')} | prompt={cost.get('prompt_tokens')} | completion={cost.get('completion_tokens')} | total={cost.get('total_tokens')} | est=${(cost.get('estimated_usd') or 0):.6f}"
+            f"OpenAI usage: model={cost.get('model')} | prompt={cost.get('prompt_tokens')} | "
+            f"completion={cost.get('completion_tokens')} | total={cost.get('total_tokens')} | "
+            f"est=${(cost.get('estimated_usd') or 0):.6f}"
         )
 
 
