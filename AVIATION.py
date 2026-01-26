@@ -704,25 +704,25 @@ def load_masterlist_df(df: pd.DataFrame) -> pd.DataFrame:
 # =========================
 # AUTH (OpenSky)
 # =========================
-# def get_access_token(client_id: str, client_secret: str, timeout=30) -> str:
-#     r = requests.post(
-#         TOKEN_URL,
-#         headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": UA},
-#         data={
-#             "grant_type": "client_credentials",
-#             "client_id": client_id,
-#             "client_secret": client_secret,
-#         },
-#         timeout=timeout,
-#     )
-#     if r.status_code == 403:
-#         raise RuntimeError("403 from token endpoint.\n" + r.text[:800])
-#     r.raise_for_status()
-#     tok = r.json()
-#     access_token = tok.get("access_token")
-#     if not access_token:
-#         raise RuntimeError(f"Token response missing access_token: {tok}")
-#     return access_token
+def get_access_token(client_id: str, client_secret: str, timeout=30) -> str:
+    r = requests.post(
+        TOKEN_URL,
+        headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": UA},
+        data={
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        },
+        timeout=timeout,
+    )
+    if r.status_code == 403:
+        raise RuntimeError("403 from token endpoint.\n" + r.text[:800])
+    r.raise_for_status()
+    tok = r.json()
+    access_token = tok.get("access_token")
+    if not access_token:
+        raise RuntimeError(f"Token response missing access_token: {tok}")
+    return access_token
 
 
 # =========================
