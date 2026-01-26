@@ -728,7 +728,7 @@ def get_access_token(client_id: str, client_secret: str, timeout=30) -> str:
 # =========================
 # FETCH
 # =========================
-def fetch_states(token: str, bbox=None, timeout=30) -> dict:
+def fetch_states(token: str, bbox=None, timeout=90) -> dict:
     params = {}
     if bbox is not None:
         min_lat, max_lat, min_lon, max_lon = bbox
