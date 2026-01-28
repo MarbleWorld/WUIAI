@@ -17,7 +17,7 @@ from rasterio.warp import transform_bounds
 from pyproj import Transformer
 
 import folium
-from branca.utilities import image_to_url
+#from branca.utilities import image_to_url
 
 
 def robust_minmax(a, lo=2, hi=98):
