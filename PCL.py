@@ -134,7 +134,7 @@ except Exception as e:
 
 # Build display overlay
 with st.spinner("Preparing map overlay..."):
-    data = ds.read(1, masked=True)
+    data = ds.read(1, masked=True).astype("float32")
     data_ds, step = downsample_for_display(data.filled(np.nan), max_dim=1400)
     png_bytes = render_overlay_png(data_ds, nodata=None, cmap="viridis")
 
