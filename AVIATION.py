@@ -592,6 +592,8 @@ except Exception:
 # STREAMLIT PAGE
 # =========================
 st.set_page_config(page_title="OpenSky USFS/CALFIRE Live Snapshot", layout="wide")
+st.caption("This only works for the current state of aircraft, not historical records")
+
 
 # Hide the sidebar entirely + Streamlit chrome (menu/footer/header)
 st.markdown(
