@@ -455,8 +455,6 @@
 
 
 
-
-
 # PCL_basic_app.py
 # Run:
 #   pip install streamlit rasterio pyproj numpy folium streamlit-folium matplotlib
@@ -588,6 +586,11 @@ def connected_components_8(mask):
 
 
 def find_nearest_high_pcl_line(arr_patch, r0, c0, center_row, center_col, thr, min_comp_pixels=25):
+    """
+    Returns nearest 8-connected component of pixels >= thr.
+    IMPORTANT: Distance is computed from clicked point to the NEAREST PIXEL IN THE COMPONENT,
+    not to its centroid. This avoids "0 m" unless you actually clicked inside the component.
+    """
     if arr_patch is None or arr_patch.size == 0:
         return None
 
@@ -602,33 +605,55 @@ def find_nearest_high_pcl_line(arr_patch, r0, c0, center_row, center_col, thr, m
 
     best = None
     best_d2 = None
+    best_nearest = None
 
     for pts in comps:
         if len(pts) < int(min_comp_pixels):
             continue
-        d2 = min((rr - pr) ** 2 + (cc - pc) ** 2 for rr, cc in pts)
+
+        # nearest pixel in this component to clicked point
+        nearest = min(pts, key=lambda p: (p[0] - pr) ** 2 + (p[1] - pc) ** 2)
+        d2 = (nearest[0] - pr) ** 2 + (nearest[1] - pc) ** 2
+
         if best_d2 is None or d2 < best_d2:
             best_d2 = d2
             best = pts
+            best_nearest = nearest
 
     if best is None:
         return None
 
+    # centroid of component
     rr_mean = int(round(np.mean([p[0] for p in best])))
     cc_mean = int(round(np.mean([p[1] for p in best])))
 
-    full_r = r0 + rr_mean
-    full_c = c0 + cc_mean
+    full_cent_r = r0 + rr_mean
+    full_cent_c = c0 + cc_mean
 
-    step = max(1, len(best) // 50)
+    full_near_r = r0 + best_nearest[0]
+    full_near_c = c0 + best_nearest[1]
+
+    step = max(1, len(best) // 80)
     reps_full = [(r0 + rr, c0 + cc) for rr, cc in best[::step]]
 
     return {
         "nearest_component_size_pixels": int(len(best)),
-        "nearest_component_centroid_rowcol": (int(full_r), int(full_c)),
+        "component_centroid_rowcol": (int(full_cent_r), int(full_cent_c)),
+        "nearest_pixel_rowcol": (int(full_near_r), int(full_near_c)),
         "min_distance_pixels": float(np.sqrt(best_d2)) if best_d2 is not None else None,
         "rep_points_rowcol": reps_full,
     }
+
+
+def approx_distance_m(ds, d_pixels):
+    # Treat as ~30 m pixels if that's your product, but still prefer ds.res
+    try:
+        px = float(max(abs(ds.res[0]), abs(ds.res[1])))
+        if np.isfinite(px) and px > 0:
+            return float(d_pixels) * px
+    except Exception:
+        pass
+    return float(d_pixels) * 30.0
 
 
 # -------------------------
@@ -638,11 +663,13 @@ st.set_page_config(page_title="PCL Basic Map-Click", layout="wide")
 st.title("PCL Basic Map-Click")
 st.caption("Workflow: 1) Upload GeoTIFF → 2) See PCL overlay → 3) Click a point → 4) Type question → 5) RUN")
 
-# --- Persist outputs so they don't "disappear" on rerun
+# Persist outputs so they don't disappear
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
-if "last_result_map" not in st.session_state:
-    st.session_state.last_result_map = None
+if "last_result_map_key" not in st.session_state:
+    st.session_state.last_result_map_key = 0  # used to force re-render
+if "last_clicked_for_run" not in st.session_state:
+    st.session_state.last_clicked_for_run = None
 
 # Session state
 if "clicked_lat" not in st.session_state:
@@ -671,7 +698,7 @@ if hasattr(band_full, "mask"):
     arr_full[band_full.mask] = np.nan
 
 with st.spinner("Rendering PCL overlay..."):
-    arr_ds, ds_step = downsample_for_display(arr_full, max_dim=1400)
+    arr_ds, _ = downsample_for_display(arr_full, max_dim=1400)
     png_bytes = render_overlay_png(arr_ds, cmap="viridis")
     img_url = png_bytes_to_data_url(png_bytes)
 
@@ -711,7 +738,13 @@ with colL:
             tooltip="Selected point",
         ).add_to(m)
 
-    out = st_folium(m, height=650, width=None, returned_objects=["last_clicked", "center", "zoom"], key="pcl_basic_map")
+    out = st_folium(
+        m,
+        height=650,
+        width=None,
+        returned_objects=["last_clicked", "center", "zoom"],
+        key="pcl_basic_map",
+    )
 
     if out:
         if out.get("center"):
@@ -737,6 +770,7 @@ with colR:
             st.warning("No valid PCL here (outside raster or NoData). Click somewhere else.")
         else:
             st.markdown(f"**PCL at selected point:** `{pcl_val:.4f}`")
+            st.caption("Interpretation: **low PCL = low probability of control**, **high PCL = high probability of control** (relative to this raster’s scaling).")
 
             question = st.text_area(
                 "Question about PCL at this point",
@@ -752,16 +786,15 @@ with colR:
                 wants_line = ("closest" in q or "nearest" in q) and ("line" in q or "continuous" in q) and ("high" in q)
 
                 if not wants_line:
-                    st.session_state.last_result = {
-                        "type": "info",
-                        "text": "Ask using keywords like: closest / high / continuous / line."
-                    }
-                    st.session_state.last_result_map = None
+                    st.session_state.last_result = {"type": "info", "text": "Try: 'closest high continuous line'."}
+                    st.session_state.last_clicked_for_run = (lat, lon)
+                    st.session_state.last_result_map_key += 1
                 else:
                     finite = arr_full[np.isfinite(arr_full)]
                     if finite.size < 100:
                         st.session_state.last_result = {"type": "error", "text": "Not enough finite PCL values to compute a threshold."}
-                        st.session_state.last_result_map = None
+                        st.session_state.last_clicked_for_run = (lat, lon)
+                        st.session_state.last_result_map_key += 1
                     else:
                         thr = float(np.percentile(finite, 90))
 
@@ -784,63 +817,34 @@ with colR:
                                 "type": "warning",
                                 "text": f"No sufficiently large continuous high-PCL component found (thr={thr:.4f}). Try another click."
                             }
-                            st.session_state.last_result_map = None
+                            st.session_state.last_clicked_for_run = (lat, lon)
+                            st.session_state.last_result_map_key += 1
                         else:
-                            cent_r, cent_c = res["nearest_component_centroid_rowcol"]
-                            tgt_lat, tgt_lon = rowcol_to_latlon(ds, cent_r, cent_c)
+                            near_r, near_c = res["nearest_pixel_rowcol"]
+                            cent_r, cent_c = res["component_centroid_rowcol"]
 
-                            try:
-                                px = max(abs(ds.res[0]), abs(ds.res[1]))
-                                dist_m = res["min_distance_pixels"] * px
-                            except Exception:
-                                dist_m = None
+                            near_lat, near_lon = rowcol_to_latlon(ds, near_r, near_c)
+                            cent_lat, cent_lon = rowcol_to_latlon(ds, cent_r, cent_c)
+
+                            dpx = float(res["min_distance_pixels"])
+                            dm = approx_distance_m(ds, dpx)
 
                             st.session_state.last_result = {
                                 "type": "answer",
                                 "thr": thr,
                                 "component_size_pixels": res["nearest_component_size_pixels"],
-                                "centroid_lat": tgt_lat,
-                                "centroid_lon": tgt_lon,
-                                "distance_m": dist_m,
-                                "distance_px": res["min_distance_pixels"],
+                                "nearest_lat": near_lat,
+                                "nearest_lon": near_lon,
+                                "centroid_lat": cent_lat,
+                                "centroid_lon": cent_lon,
+                                "distance_m": dm,
+                                "distance_px": dpx,
+                                "rep_points_rowcol": res["rep_points_rowcol"],
+                                "clicked_lat": lat,
+                                "clicked_lon": lon,
                             }
-
-                            m2 = folium.Map(location=[lat, lon], zoom_start=st.session_state.map_zoom, control_scale=True, tiles="CartoDB positron")
-                            folium.raster_layers.ImageOverlay(
-                                name="PCL",
-                                image=img_url,
-                                bounds=[[miny, minx], [maxy, maxx]],
-                                opacity=0.75,
-                                interactive=True,
-                                cross_origin=False,
-                                zindex=2,
-                            ).add_to(m2)
-
-                            folium.CircleMarker(
-                                location=[lat, lon],
-                                radius=8,
-                                weight=2,
-                                color="yellow",
-                                fill=True,
-                                fill_opacity=0.35,
-                                tooltip="Clicked point",
-                            ).add_to(m2)
-
-                            folium.CircleMarker(
-                                location=[tgt_lat, tgt_lon],
-                                radius=8,
-                                weight=2,
-                                color="red",
-                                fill=True,
-                                fill_opacity=0.35,
-                                tooltip="Nearest high-PCL component centroid",
-                            ).add_to(m2)
-
-                            rep_latlons = [rowcol_to_latlon(ds, rr, cc) for rr, cc in res["rep_points_rowcol"]]
-                            folium.PolyLine(locations=rep_latlons, weight=4, opacity=0.9).add_to(m2)
-
-                            folium.LayerControl().add_to(m2)
-                            st.session_state.last_result_map = m2
+                            st.session_state.last_clicked_for_run = (lat, lon)
+                            st.session_state.last_result_map_key += 1
 
 # -------------------------
 # Persistent Results Section (ALWAYS BELOW)
@@ -848,10 +852,10 @@ with colR:
 st.markdown("---")
 st.header("Results")
 
-if st.session_state.last_result is None:
+r = st.session_state.last_result
+if r is None:
     st.info("No results yet. Click a point, type a question, then hit RUN.")
 else:
-    r = st.session_state.last_result
     if r["type"] == "error":
         st.error(r["text"])
     elif r["type"] == "warning":
@@ -859,18 +863,60 @@ else:
     elif r["type"] == "info":
         st.info(r["text"])
     else:
-        thr = r["thr"]
-        st.markdown(f"**High threshold used:** 90th percentile = `{thr:.4f}`")
+        st.markdown(f"**High threshold used:** 90th percentile = `{r['thr']:.4f}`")
         st.markdown(f"**Nearest continuous high-PCL component:** size = **{r['component_size_pixels']} px**")
-        st.markdown(f"**Centroid:** lat={r['centroid_lat']:.6f}, lon={r['centroid_lon']:.6f}")
-        if r["distance_m"] is not None:
-            st.markdown(f"**Approx distance from click:** {r['distance_m']:.1f} m")
-        else:
-            st.markdown(f"**Distance from click:** {r['distance_px']:.1f} px")
+        st.markdown(f"**Nearest point on that feature:** lat={r['nearest_lat']:.6f}, lon={r['nearest_lon']:.6f}")
+        st.markdown(f"**Component centroid:** lat={r['centroid_lat']:.6f}, lon={r['centroid_lon']:.6f}")
+        st.markdown(f"**Approx distance from click to nearest high-PCL pixel:** **{r['distance_m']:.1f} m** (~{r['distance_px']:.2f} px)")
 
-if st.session_state.last_result_map is not None:
-    st.subheader("Map of result (highlighted)")
-    st_folium(st.session_state.last_result_map, height=520, width=None, key="pcl_result_map_persist")
+        st.caption("Interpretation: **low PCL = low probability of control**, **high PCL = high probability of control** (relative to this raster’s scaling).")
+
+        # Always rebuild result map from stored result so Streamlit can render it reliably
+        m2 = folium.Map(
+            location=[r["clicked_lat"], r["clicked_lon"]],
+            zoom_start=st.session_state.map_zoom,
+            control_scale=True,
+            tiles="CartoDB positron",
+        )
+
+        folium.raster_layers.ImageOverlay(
+            name="PCL",
+            image=img_url,
+            bounds=[[miny, minx], [maxy, maxx]],
+            opacity=0.75,
+            interactive=True,
+            cross_origin=False,
+            zindex=2,
+        ).add_to(m2)
+
+        folium.CircleMarker(
+            location=[r["clicked_lat"], r["clicked_lon"]],
+            radius=8,
+            weight=2,
+            color="yellow",
+            fill=True,
+            fill_opacity=0.35,
+            tooltip="Clicked point",
+        ).add_to(m2)
+
+        folium.CircleMarker(
+            location=[r["nearest_lat"], r["nearest_lon"]],
+            radius=8,
+            weight=2,
+            color="red",
+            fill=True,
+            fill_opacity=0.35,
+            tooltip="Nearest high-PCL pixel (on continuous feature)",
+        ).add_to(m2)
+
+        rep_latlons = [rowcol_to_latlon(ds, rr, cc) for rr, cc in r["rep_points_rowcol"]]
+        folium.PolyLine(locations=rep_latlons, weight=4, opacity=0.9).add_to(m2)
+
+        folium.LayerControl().add_to(m2)
+
+        st.subheader("Map of result (highlighted)")
+        # Force unique key so it doesn't silently fail to update
+        st_folium(m2, height=520, width=None, key=f"pcl_result_map_persist_{st.session_state.last_result_map_key}")
 
 # cleanup temp file (best effort)
 try:
@@ -878,8 +924,6 @@ try:
         os.remove(tmp_path)
 except Exception:
     pass
-
-
 
 
 
