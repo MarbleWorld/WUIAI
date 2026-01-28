@@ -588,71 +588,176 @@ except Exception:
     OpenAI = None
 
 
+# # =========================
+# # STREAMLIT PAGE
+# # =========================
+# #st.set_page_config(page_title="OpenSky USFS/CALFIRE Live Snapshot", layout="wide")
+
+# st.title("OpenSky USFS/CALFIRE Live Snapshot")
+# st.caption("This is for current aircraft locations not historical records")
+
+# st.divider()  
+
+
+
+# # Hide the sidebar entirely + Streamlit chrome (menu/footer/header)
+# st.markdown(
+#     """
+#     <style>
+#       section[data-testid="stSidebar"] {display: none;}
+#       div[data-testid="stSidebarNav"] {display: none;}
+#       #MainMenu {visibility: hidden;}
+#       footer {visibility: hidden;}
+#       header {visibility: hidden;}
+#     </style>
+#     """,
+#     unsafe_allow_html=True,
+# )
+
+# st.markdown(
+#     """
+#     <style>
+#     .big-button button {
+#         background: linear-gradient(90deg, #1f2937, #111827);
+#         color: white !important;
+#         border-radius: 14px;
+#         padding: 0.75rem 1.25rem;
+#         border: 1px solid rgba(255,255,255,0.15);
+#         font-weight: 700;
+#         letter-spacing: 0.02em;
+#         box-shadow: 0 10px 30px rgba(0,0,0,0.20);
+#         transition: transform 0.06s ease-in-out;
+#     }
+#     .big-button button:hover {
+#         transform: translateY(-1px);
+#         border: 1px solid rgba(255,255,255,0.30);
+#     }
+#     .muted {
+#         color: rgba(0,0,0,0.65);
+#         font-size: 0.95rem;
+#     }
+#     </style>
+#     """,
+#     unsafe_allow_html=True,
+# )
+
+# #st.title("OpenSky Live Snapshot — USFS / CAL FIRE")
+# st.markdown(
+#     '<div class="muted">Queries current OpenSky “states” in a Western US bounding box, matches to your USFS/CALFIRE masterlist, then answers a question (optionally using OpenAI).</div>',
+#     unsafe_allow_html=True,
+# )
+
+# if not GIS_OK:
+#     st.warning(
+#         "Map rendering dependencies are missing in this environment (geopandas/shapely/contextily). "
+#         "The app will still run and show tables + answers. "
+#         f"Import error: {GIS_ERR}"
+#     )
+
+
 # =========================
 # STREAMLIT PAGE
 # =========================
-#st.set_page_config(page_title="OpenSky USFS/CALFIRE Live Snapshot", layout="wide")
+import streamlit as st
+
+# If you want this, keep it at the very top of the script:
+# st.set_page_config(page_title="OpenSky USFS/CALFIRE Live Snapshot", layout="wide")
 
 st.title("OpenSky USFS/CALFIRE Live Snapshot")
-st.caption("This is for current aircraft locations not historical records")
+st.caption("Current aircraft locations (not historical tracks)")
 
-st.divider()  
+st.divider()
 
-
-
-# Hide the sidebar entirely + Streamlit chrome (menu/footer/header)
+# -------------------------
+# Global UI cleanup + readable defaults
+# -------------------------
 st.markdown(
     """
     <style>
-      section[data-testid="stSidebar"] {display: none;}
-      div[data-testid="stSidebarNav"] {display: none;}
+      /* Hide Streamlit chrome */
+      section[data-testid="stSidebar"] {display: none !important;}
+      div[data-testid="stSidebarNav"] {display: none !important;}
       #MainMenu {visibility: hidden;}
       footer {visibility: hidden;}
       header {visibility: hidden;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
-st.markdown(
-    """
-    <style>
-    .big-button button {
-        background: linear-gradient(90deg, #1f2937, #111827);
+      /* Typography + spacing */
+      .app-subtitle {
+        color: rgba(0,0,0,0.70);
+        font-size: 0.98rem;
+        line-height: 1.35;
+        margin-top: 0.15rem;
+        margin-bottom: 0.85rem;
+      }
+
+      /* Make text inputs readable (fixes "black text you can't see") */
+      textarea, input, [data-baseweb="textarea"] textarea, [data-baseweb="input"] input {
+        color: #111827 !important;
+        background: #ffffff !important;
+        -webkit-text-fill-color: #111827 !important;
+        caret-color: #111827 !important;
+      }
+      [data-baseweb="textarea"] textarea::placeholder,
+      [data-baseweb="input"] input::placeholder {
+        color: rgba(17,24,39,0.45) !important;
+        -webkit-text-fill-color: rgba(17,24,39,0.45) !important;
+      }
+
+      /* Optional: tighten top padding */
+      .block-container { padding-top: 1.25rem; }
+
+      /* Big button style (if you use st.button inside st.markdown container) */
+      .big-button button {
+        background: linear-gradient(90deg, #1f2937, #111827) !important;
         color: white !important;
-        border-radius: 14px;
-        padding: 0.75rem 1.25rem;
-        border: 1px solid rgba(255,255,255,0.15);
-        font-weight: 700;
-        letter-spacing: 0.02em;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.20);
+        border-radius: 14px !important;
+        padding: 0.75rem 1.25rem !important;
+        border: 1px solid rgba(255,255,255,0.18) !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.02em !important;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.20) !important;
         transition: transform 0.06s ease-in-out;
-    }
-    .big-button button:hover {
+      }
+      .big-button button:hover {
         transform: translateY(-1px);
-        border: 1px solid rgba(255,255,255,0.30);
-    }
-    .muted {
-        color: rgba(0,0,0,0.65);
-        font-size: 0.95rem;
-    }
+        border: 1px solid rgba(255,255,255,0.30) !important;
+      }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-#st.title("OpenSky Live Snapshot — USFS / CAL FIRE")
 st.markdown(
-    '<div class="muted">Queries current OpenSky “states” in a Western US bounding box, matches to your USFS/CALFIRE masterlist, then answers a question (optionally using OpenAI).</div>',
+    '<div class="app-subtitle">'
+    'Pulls the current OpenSky “states” in a Western US bounding box, matches to your USFS/CALFIRE masterlist, '
+    'then answers questions about <b>this live snapshot</b> (optional OpenAI).'
+    '</div>',
     unsafe_allow_html=True,
 )
 
-if not GIS_OK:
-    st.warning(
-        "Map rendering dependencies are missing in this environment (geopandas/shapely/contextily). "
-        "The app will still run and show tables + answers. "
-        f"Import error: {GIS_ERR}"
-    )
+# Example prompt UI (so it’s not duplicated / cluttered)
+question = st.text_area(
+    "Ask a question about the CURRENT aircraft snapshot:",
+    value="How many helicopters are in the air and what agencies are they from?",
+    height=110,
+)
+
+# If you want a big RUN button:
+st.markdown('<div class="big-button">', unsafe_allow_html=True)
+run = st.button("RUN", use_container_width=True, type="primary")
+st.markdown("</div>", unsafe_allow_html=True)
+
+# GIS warning (leave as-is, but it's now visually separated)
+try:
+    if not GIS_OK:
+        st.warning(
+            "Map rendering dependencies are missing in this environment (geopandas/shapely/contextily). "
+            "The app will still run and show tables + answers. "
+            f"Import error: {GIS_ERR}"
+        )
+except NameError:
+    pass
+
 
 # =========================
 # CONFIG
