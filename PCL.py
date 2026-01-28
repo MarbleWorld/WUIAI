@@ -1,5 +1,6 @@
 # app_pcl_query.py
 # pip install streamlit rasterio pyproj numpy matplotlib folium streamlit-folium
+import base64
 
 import io
 import os
@@ -145,7 +146,8 @@ center_lon = (minx + maxx) / 2
 
 m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="CartoDB positron")
 
-img_url = image_to_url(png_bytes, origin="upper")
+#img_url = image_to_url(png_bytes, origin="upper")
+img_url = "data:image/png;base64," + base64.b64encode(png_bytes).decode("utf-8")
 folium.raster_layers.ImageOverlay(
     name="PCL",
     image=img_url,
