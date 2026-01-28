@@ -641,7 +641,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("OpenSky Live Snapshot — USFS / CAL FIRE")
+#st.title("OpenSky Live Snapshot — USFS / CAL FIRE")
 st.markdown(
     '<div class="muted">Queries current OpenSky “states” in a Western US bounding box, matches to your USFS/CALFIRE masterlist, then answers a question (optionally using OpenAI).</div>',
     unsafe_allow_html=True,
