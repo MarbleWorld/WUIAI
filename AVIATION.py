@@ -1254,6 +1254,22 @@ import matplotlib.pyplot as plt
 
 import streamlit as st
 
+
+st.set_page_config(
+    page_title="OpenSky USFS/CALFIRE Live Snapshot",
+    layout="wide",
+)
+st.markdown("""
+<style>
+  .block-container {
+    max-width: 100% !important;
+    padding-left: 2.5rem;
+    padding-right: 2.5rem;
+  }
+</style>
+""", unsafe_allow_html=True)
+
+
 # ---- OPTIONAL GIS STACK (so the app runs even if shapely/geopandas aren't installed)
 GIS_OK = True
 GIS_ERR = ""
