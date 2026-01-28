@@ -591,7 +591,7 @@ except Exception:
 # =========================
 # STREAMLIT PAGE
 # =========================
-st.set_page_config(page_title="OpenSky USFS/CALFIRE Live Snapshot", layout="wide")
+#st.set_page_config(page_title="OpenSky USFS/CALFIRE Live Snapshot", layout="wide")
 
 st.title("OpenSky USFS/CALFIRE Live Snapshot")
 st.caption("This is for current aircraft locations not historical records")
