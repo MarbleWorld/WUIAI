@@ -2,8 +2,8 @@
 # pip install streamlit rasterio pyproj numpy matplotlib folium streamlit-folium
 
 import io
-import re
-import base64
+import os
+import tempfile
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -19,9 +19,6 @@ import folium
 from branca.utilities import image_to_url
 
 
-PCL_TIF = r"C:\Users\magst\Desktop\RCVFD_gis\RCVFD\PCL_RCVFD.tif"
-
-
 def robust_minmax(a, lo=2, hi=98):
     a = a[np.isfinite(a)]
     if a.size == 0:
@@ -31,7 +28,6 @@ def robust_minmax(a, lo=2, hi=98):
 
 def render_overlay_png(data2d, nodata=None, cmap="viridis"):
     arr = data2d.astype("float32", copy=False)
-
     if nodata is not None:
         arr = np.where(arr == nodata, np.nan, arr)
 
@@ -44,7 +40,7 @@ def render_overlay_png(data2d, nodata=None, cmap="viridis"):
     fig = plt.figure(figsize=(6, 6), dpi=200)
     ax = plt.axes([0, 0, 1, 1])
     ax.set_axis_off()
-    im = ax.imshow(arr, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
+    ax.imshow(arr, cmap=cmap, vmin=vmin, vmax=vmax, interpolation="nearest")
     ax.set_facecolor((0, 0, 0, 0))
     fig.patch.set_alpha(0)
 
@@ -63,7 +59,6 @@ def downsample_for_display(data, max_dim=1200):
 
 
 def sample_at_latlon(ds, lat, lon):
-    # lat/lon -> dataset CRS -> row/col
     transformer = Transformer.from_crs("EPSG:4326", ds.crs, always_xy=True)
     x, y = transformer.transform(lon, lat)
     row, col = ds.index(x, y)
@@ -75,7 +70,6 @@ def sample_at_latlon(ds, lat, lon):
     val = ds.read(1, window=win, masked=True)[0, 0]
     if np.ma.is_masked(val):
         return None
-
     return float(val)
 
 
@@ -87,7 +81,6 @@ def local_stats_at_latlon(ds, lat, lon, radius_m=150):
     if row < 0 or col < 0 or row >= ds.height or col >= ds.width:
         return None
 
-    # approximate meters per pixel (works fine for projected CRS)
     try:
         resx, resy = ds.res
         px = max(abs(resx), abs(resy))
@@ -102,7 +95,6 @@ def local_stats_at_latlon(ds, lat, lon, radius_m=150):
 
     win = Window(c0, r0, c1 - c0, r1 - r0)
     block = ds.read(1, window=win, masked=True)
-
     if block.count() == 0:
         return None
 
@@ -118,72 +110,46 @@ def local_stats_at_latlon(ds, lat, lon, radius_m=150):
     }
 
 
-def answer_question(question, pcl_value, stats=None):
-    q = (question or "").strip().lower()
-
-    if pcl_value is None:
-        return "No valid PCL value at that clicked location (outside raster or NoData)."
-
-    # lightweight intent detection
-    want_value = bool(re.search(r"\b(value|pcl|score|what is|whats|what's)\b", q)) or q == ""
-    want_explain = bool(re.search(r"\b(mean|median|min|max|std|nearby|around|within|radius|local)\b", q))
-    want_interpret = bool(re.search(r"\b(good|bad|high|low|interpret|meaning|does it mean|should i)\b", q))
-
-    lines = []
-
-    if want_value or (not want_explain and not want_interpret):
-        lines.append(f"PCL at the clicked point: **{pcl_value:.4f}**")
-
-    if want_explain:
-        if stats is None:
-            lines.append("Could not compute local stats (NoData neighborhood or outside raster).")
-        else:
-            lines.append(
-                f"Local PCL stats within ~{int(stats['radius_m'])} m "
-                f"(n={stats['n']}): mean={stats['mean']:.4f}, median={stats['median']:.4f}, "
-                f"min={stats['min']:.4f}, max={stats['max']:.4f}, std={stats['std']:.4f}"
-            )
-
-    if want_interpret:
-        lines.append(
-            "Interpretation (generic): higher PCL typically indicates *more favorable* potential control location "
-            "relative to lower PCL, but the exact meaning depends on how your PCL raster was produced "
-            "(normalization, thresholds, and covariates)."
-        )
-
-    return "\n\n".join(lines)
-
-
 st.set_page_config(page_title="RCVFD PCL Click + Query", layout="wide")
-st.title("RCVFD PCL: click the map, then ask about PCL at that location")
+st.title("RCVFD PCL: click the map, sample the raster")
 
-@st.cache_resource
-def load_ds(path):
-    return rasterio.open(path)
+uploaded = st.file_uploader("Upload your PCL GeoTIFF (.tif)", type=["tif", "tiff"])
 
-ds = load_ds(PCL_TIF)
+if uploaded is None:
+    st.info("Upload the PCL_RCVFD.tif file to start.")
+    st.stop()
 
-# Read a display version (downsampled)
-with st.spinner("Loading raster for display..."):
+# Write upload to a temp file so rasterio can open it
+suffix = ".tif"
+with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+    tmp.write(uploaded.getbuffer())
+    tmp_path = tmp.name
+
+# Open raster
+try:
+    ds = rasterio.open(tmp_path)
+except Exception as e:
+    st.error(f"Failed to open the uploaded raster: {e}")
+    st.stop()
+
+# Build display overlay
+with st.spinner("Preparing map overlay..."):
     data = ds.read(1, masked=True)
-    nodata = ds.nodata
     data_ds, step = downsample_for_display(data.filled(np.nan), max_dim=1400)
     png_bytes = render_overlay_png(data_ds, nodata=None, cmap="viridis")
 
-# Dataset bounds -> lat/lon bounds for folium
 bounds_ll = transform_bounds(ds.crs, "EPSG:4326", *ds.bounds, densify_pts=21)
-minx, miny, maxx, maxy = bounds_ll  # lon/lat
+minx, miny, maxx, maxy = bounds_ll
 center_lat = (miny + maxy) / 2
 center_lon = (minx + maxx) / 2
 
-m = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles="CartoDB positron")
+m = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="CartoDB positron")
 
-# Add raster overlay
 img_url = image_to_url(png_bytes, origin="upper")
 folium.raster_layers.ImageOverlay(
     name="PCL",
     image=img_url,
-    bounds=[[miny, minx], [maxy, maxx]],  # [[south, west], [north, east]]
+    bounds=[[miny, minx], [maxy, maxx]],
     opacity=0.75,
     interactive=True,
     cross_origin=False,
@@ -195,31 +161,39 @@ folium.LayerControl().add_to(m)
 colA, colB = st.columns([1.2, 1.0], gap="large")
 
 with colA:
-    st.subheader("Map (click anywhere on the overlay)")
+    st.subheader("Map (click to query PCL)")
     out = st_folium(m, width=900, height=700, returned_objects=["last_clicked"])
     clicked = out.get("last_clicked", None)
 
 with colB:
-    st.subheader("Query")
+    st.subheader("Result")
     if clicked is None:
-        st.info("Click a point on the map to sample PCL.")
+        st.info("Click on the map to sample PCL.")
         st.stop()
 
     lat = float(clicked["lat"])
     lon = float(clicked["lng"])
-
-    pcl_val = sample_at_latlon(ds, lat, lon)
     st.markdown(f"**Clicked:** lat={lat:.6f}, lon={lon:.6f}")
 
-    # Optional neighborhood stats controls
-    radius_m = st.slider("Neighborhood radius (meters)", min_value=30, max_value=1000, value=150, step=10)
+    pcl_val = sample_at_latlon(ds, lat, lon)
+    if pcl_val is None:
+        st.warning("No valid PCL value here (outside raster or NoData).")
+        st.stop()
+
+    radius_m = st.slider("Neighborhood radius (meters)", 30, 1000, 150, 10)
     stats = local_stats_at_latlon(ds, lat, lon, radius_m=radius_m)
 
-    q = st.text_input(
-        "Ask a question about PCL at this location",
-        value="What is the PCL value here, and what are nearby stats?",
-        placeholder="e.g., 'Is this a good control location?' or 'nearby mean/median within 200m'",
-    )
+    st.markdown(f"**PCL at point:** {pcl_val:.4f}")
+    if stats is not None:
+        st.markdown(
+            f"**Local stats (~{int(stats['radius_m'])} m, n={stats['n']}):** "
+            f"mean={stats['mean']:.4f}, median={stats['median']:.4f}, "
+            f"min={stats['min']:.4f}, max={stats['max']:.4f}, std={stats['std']:.4f}"
+        )
 
-    resp = answer_question(q, pcl_val, stats=stats)
-    st.markdown(resp)
+# cleanup temp file on rerun/exit (best-effort)
+try:
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+except Exception:
+    pass
