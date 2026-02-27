@@ -1,3 +1,6 @@
+st.write("Secrets keys:", list(st.secrets.keys()))
+st.write("OpenAI block:", st.secrets.get("openai", {}))
+
 # #!/usr/bin/env python3
 # # -*- coding: utf-8 -*-
 
