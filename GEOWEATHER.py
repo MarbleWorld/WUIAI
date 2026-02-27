@@ -3148,11 +3148,17 @@ def resolve_location(description: str):
 # OPENAI KEY RESOLUTION (secrets first, then env)
 # ───────────────────────────────────────────────────────────────────────────────
 def get_openai_api_key():
-    key = st.secrets.get("openai", {}).get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    openai_block = st.secrets.get("openai", {})
+    key = (
+        openai_block.get("OPENAI_API_KEY")
+        or openai_block.get("api_key")
+        or st.secrets.get("OPENAI_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+    )
     if not key:
         raise RuntimeError(
-            "OPENAI_API_KEY not set. Add:\n"
-            "[openai]\nOPENAI_API_KEY = \"...\"\n"
+            "OPENAI_API_KEY not set. Add Streamlit secret:\n"
+            "[openai]\nOPENAI_API_KEY = \"...\"  (or api_key)\n"
             "or set environment variable OPENAI_API_KEY."
         )
     return key
