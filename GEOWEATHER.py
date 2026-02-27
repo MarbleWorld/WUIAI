@@ -1,10 +1,8 @@
 import streamlit as st
-st.set_page_config(page_title="Weather (GPT-only)", layout="centered")
-
-import streamlit as st
 st.write("Secrets keys:", list(st.secrets.keys()))
-st.write("OpenAI block:", st.secrets.get("openai", {}))
-
+st.write("OpenAI block:", dict(st.secrets.get("openai", {})))
+st.write("Top-level OPENAI_API_KEY present:", "OPENAI_API_KEY" in st.secrets)
+st.write("Env OPENAI_API_KEY set:", bool(os.getenv("OPENAI_API_KEY")))
 # #!/usr/bin/env python3
 # # -*- coding: utf-8 -*-
 
