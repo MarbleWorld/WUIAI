@@ -1,3 +1,4 @@
+import streamlit as st
 st.write("Secrets keys:", list(st.secrets.keys()))
 st.write("OpenAI block:", st.secrets.get("openai", {}))
 
