@@ -386,9 +386,11 @@
 
 """
 Streamlit app: NWS Forecast Reporter
-- Uses Photon geocoder ONLY (no email required)
-- Supports: "15 miles north of Miami, Florida"
-- Uses NWS api.weather.gov (U.S. only)
+Supports:
+    "15 miles north of Miami, Florida"
+    "200 km south of Fort Collins, CO"
+    "10 kilometers NE of Boulder, CO"
+    "50 miels west of Denver, CO"
 
 Run:
   pip install streamlit requests
@@ -396,13 +398,11 @@ Run:
 """
 
 import re
-import time
 import math
 import requests
 import streamlit as st
-from textwrap import shorten
 
-USER_AGENT = "WeatherStreamlitApp/1.0"
+USER_AGENT = "WeatherStreamlitApp/1.2"
 NWS_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/geo+json, application/json"}
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -424,7 +424,7 @@ def geocode_place(query: str):
 
     feats = data.get("features") or []
     if not feats:
-        raise RuntimeError("No location found.")
+        raise RuntimeError("No location found (Photon). Try city + state.")
 
     props = feats[0].get("properties") or {}
     lon, lat = feats[0]["geometry"]["coordinates"]
@@ -439,41 +439,73 @@ def geocode_place(query: str):
     return float(lat), float(lon), label
 
 # ───────────────────────────────────────────────────────────────────────────────
-# RELATIVE LOCATION SUPPORT
+# RELATIVE LOCATION SUPPORT (miles + kilometers)
 # ───────────────────────────────────────────────────────────────────────────────
 REL_RE = re.compile(
-    r"^\s*(?P<miles>\d+(?:\.\d+)?)\s*miles?\s*(?P<dir>north|south|east|west|n|s|e|w)\s*of\s*(?P<place>.+?)\s*$",
-    re.IGNORECASE,
+    r"""
+    ^\s*
+    (?P<distance>\d+(?:\.\d+)?)\s*
+    (?P<unit>mi|mile|miles|miels|km|kms|kilometer|kilometers)\s*
+    (?P<dir>north|south|east|west|n|s|e|w|ne|nw|se|sw|
+            northeast|northwest|southeast|southwest)\s*
+    of\s*
+    (?P<place>.+?)\s*
+    $
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 
-def offset_latlon(lat, lon, miles, direction):
+def _dir_to_bearing(dir_str: str) -> float:
+    d = dir_str.lower()
+    mapping = {
+        "n": 0, "north": 0,
+        "ne": 45, "northeast": 45,
+        "e": 90, "east": 90,
+        "se": 135, "southeast": 135,
+        "s": 180, "south": 180,
+        "sw": 225, "southwest": 225,
+        "w": 270, "west": 270,
+        "nw": 315, "northwest": 315,
+    }
+    return mapping[d]
+
+def convert_to_miles(distance: float, unit: str) -> float:
+    u = unit.lower()
+    if u in ("km", "kms", "kilometer", "kilometers"):
+        return distance * 0.621371
+    return distance  # miles or typo treated as miles
+
+def offset_latlon_bearing(lat: float, lon: float, miles: float, bearing_deg: float):
     miles_per_deg_lat = 69.0
+    dlat = (miles / miles_per_deg_lat) * math.cos(math.radians(bearing_deg))
+
     miles_per_deg_lon = 69.0 * max(0.01, abs(math.cos(math.radians(lat))))
+    dlon = (miles / miles_per_deg_lon) * math.sin(math.radians(bearing_deg))
 
-    direction = direction.lower()
-    if direction in ("north", "n"):
-        lat += miles / miles_per_deg_lat
-    elif direction in ("south", "s"):
-        lat -= miles / miles_per_deg_lat
-    elif direction in ("east", "e"):
-        lon += miles / miles_per_deg_lon
-    elif direction in ("west", "w"):
-        lon -= miles / miles_per_deg_lon
+    return lat + dlat, lon + dlon
 
-    return lat, lon
+def resolve_location(description: str):
+    s = (description or "").strip()
+    if not s:
+        raise ValueError("Location is empty.")
 
-def resolve_location(description):
-    m = REL_RE.match(description.strip())
+    m = REL_RE.match(s)
     if m:
-        miles = float(m.group("miles"))
+        distance = float(m.group("distance"))
+        unit = m.group("unit")
         direction = m.group("dir")
         place = m.group("place").strip()
+
+        miles = convert_to_miles(distance, unit)
+
         base_lat, base_lon, base_label = geocode_place(place)
-        lat, lon = offset_latlon(base_lat, base_lon, miles, direction)
-        label = f"{miles:g} miles {direction.lower()} of {base_label}"
+        bearing = _dir_to_bearing(direction)
+        lat, lon = offset_latlon_bearing(base_lat, base_lon, miles, bearing)
+
+        label = f"{distance:g} {unit} {direction.lower()} of {base_label}"
         return lat, lon, label
 
-    return geocode_place(description)
+    return geocode_place(s)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # NWS
@@ -492,7 +524,7 @@ def nws_periods(lat, lon, hourly=False):
 st.set_page_config(page_title="Weather", layout="centered")
 st.title("Weather Forecast")
 
-location = st.text_input("Enter location", "15 miles north of Miami, Florida")
+location = st.text_input("Enter location", "200 km north of Fort Collins, CO")
 include_hourly = st.checkbox("Include hourly forecast", True)
 
 if st.button("Get Forecast", type="primary"):
@@ -510,17 +542,18 @@ if st.button("Get Forecast", type="primary"):
         st.subheader("Daily Forecast")
         for p in daily[:8]:
             st.write(
-                f"**{p['name']}** — {p['temperature']}°{p['temperatureUnit']} | "
-                f"{p['windSpeed']} {p['windDirection']} | "
-                f"{p['shortForecast']}"
+                f"**{p.get('name','—')}** — {p.get('temperature','—')}°{p.get('temperatureUnit','')} | "
+                f"{p.get('windSpeed','—')} {p.get('windDirection','')} | "
+                f"{p.get('shortForecast','—')}"
             )
 
         if include_hourly:
             st.subheader("Hourly Snapshot")
             for p in hourly[:12]:
+                start = (p.get("startTime") or "—")[:16]
                 st.write(
-                    f"{p['startTime'][:16]} — {p['temperature']}°{p['temperatureUnit']} | "
-                    f"{p['shortForecast']}"
+                    f"{start} — {p.get('temperature','—')}°{p.get('temperatureUnit','')} | "
+                    f"{p.get('shortForecast','—')}"
                 )
 
         with st.expander("Raw forecast URLs"):
@@ -530,5 +563,3 @@ if st.button("Get Forecast", type="primary"):
 
     except Exception as e:
         st.error(str(e))
-
-
