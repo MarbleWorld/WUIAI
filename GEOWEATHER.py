@@ -3147,23 +3147,15 @@ def resolve_location(description: str):
 # ───────────────────────────────────────────────────────────────────────────────
 # OPENAI KEY RESOLUTION (secrets first, then env)
 # ───────────────────────────────────────────────────────────────────────────────
-def get_openai_api_key() -> str:
-    key = ""
-    try:
-        key = (st.secrets.get("openai", {}) or {}).get("api_key", "") or ""
-    except Exception:
-        key = ""
-    if not key:
-        key = os.getenv("OPENAI_API_KEY", "") or ""
-    key = str(key).strip()
+def get_openai_api_key():
+    key = st.secrets.get("openai", {}).get("api_key") or os.getenv("OPENAI_API_KEY")
     if not key:
         raise RuntimeError(
-            "OPENAI_API_KEY is not set. Add it to Streamlit secrets:\n"
+            "OPENAI_API_KEY not set. Add:\n"
             "[openai]\napi_key = \"...\"\n"
             "or set environment variable OPENAI_API_KEY."
         )
     return key
-
 # ───────────────────────────────────────────────────────────────────────────────
 # GPT WEB WEATHER ONLY
 # ───────────────────────────────────────────────────────────────────────────────
