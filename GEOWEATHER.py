@@ -380,17 +380,18 @@
 #         st.error(str(e))
 
 
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
 Streamlit app: NWS Forecast Reporter
-Supports:
-    "15 miles north of Miami, Florida"
+- Geocoding: Photon primary (with proper User-Agent), Nominatim fallback (no email)
+- Supports:
+    "500 miles north of Fort Collins, CO"
     "200 km south of Fort Collins, CO"
-    "10 kilometers NE of Boulder, CO"
-    "50 miels west of Denver, CO"
+    "10 mi SW of Boulder, CO"
+    "200 miels N of Fort Collins, CO"  (common typo)
+- Forecast: NWS api.weather.gov (U.S. only)
 
 Run:
   pip install streamlit requests
@@ -399,10 +400,12 @@ Run:
 
 import re
 import math
+import time
 import requests
 import streamlit as st
 
-USER_AGENT = "WeatherStreamlitApp/1.2"
+USER_AGENT = "WeatherStreamlitApp/1.3"
+COMMON_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 NWS_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/geo+json, application/json"}
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -414,29 +417,53 @@ def _get_json(url, params=None, headers=None, timeout=30):
     return r.json()
 
 # ───────────────────────────────────────────────────────────────────────────────
-# GEOCODING (Photon only)
+# GEOCODING
 # ───────────────────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=3600)
-def geocode_place(query: str):
+def geocode_photon(query: str):
     url = "https://photon.komoot.io/api/"
     params = {"q": query, "limit": 1}
-    data = _get_json(url, params=params)
+    data = _get_json(url, params=params, headers=COMMON_HEADERS)
 
     feats = data.get("features") or []
     if not feats:
-        raise RuntimeError("No location found (Photon). Try city + state.")
+        raise RuntimeError("No location found (Photon).")
 
-    props = feats[0].get("properties") or {}
-    lon, lat = feats[0]["geometry"]["coordinates"]
+    feat = feats[0]
+    props = feat.get("properties") or {}
+    lon, lat = feat.get("geometry", {}).get("coordinates", [None, None])
+    if lat is None or lon is None:
+        raise RuntimeError("Photon result missing coordinates.")
 
     label_parts = []
     for k in ("name", "city", "state", "country"):
         v = props.get(k)
         if v and v not in label_parts:
             label_parts.append(v)
-
     label = ", ".join(label_parts) if label_parts else query
+
     return float(lat), float(lon), label
+
+def geocode_nominatim(query: str):
+    # No email usage here; just a proper User-Agent.
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {"q": query, "format": "json", "limit": 1, "addressdetails": 0}
+    data = _get_json(url, params=params, headers=COMMON_HEADERS)
+
+    if not data:
+        raise RuntimeError("No location found (Nominatim).")
+
+    lat = float(data[0]["lat"])
+    lon = float(data[0]["lon"])
+    name = data[0].get("display_name", query)
+    return lat, lon, name
+
+@st.cache_data(ttl=3600)
+def geocode_place(query: str):
+    # Photon first; fallback to Nominatim if Photon blocks/rate-limits.
+    try:
+        return geocode_photon(query)
+    except Exception:
+        return geocode_nominatim(query)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # RELATIVE LOCATION SUPPORT (miles + kilometers)
@@ -456,26 +483,29 @@ REL_RE = re.compile(
 )
 
 def _dir_to_bearing(dir_str: str) -> float:
-    d = dir_str.lower()
+    d = dir_str.strip().lower()
     mapping = {
-        "n": 0, "north": 0,
-        "ne": 45, "northeast": 45,
-        "e": 90, "east": 90,
-        "se": 135, "southeast": 135,
-        "s": 180, "south": 180,
-        "sw": 225, "southwest": 225,
-        "w": 270, "west": 270,
-        "nw": 315, "northwest": 315,
+        "n": 0.0, "north": 0.0,
+        "ne": 45.0, "northeast": 45.0,
+        "e": 90.0, "east": 90.0,
+        "se": 135.0, "southeast": 135.0,
+        "s": 180.0, "south": 180.0,
+        "sw": 225.0, "southwest": 225.0,
+        "w": 270.0, "west": 270.0,
+        "nw": 315.0, "northwest": 315.0,
     }
+    if d not in mapping:
+        raise ValueError(f"Unsupported direction: {dir_str}")
     return mapping[d]
 
-def convert_to_miles(distance: float, unit: str) -> float:
-    u = unit.lower()
+def _to_miles(distance: float, unit: str) -> float:
+    u = unit.strip().lower()
     if u in ("km", "kms", "kilometer", "kilometers"):
         return distance * 0.621371
-    return distance  # miles or typo treated as miles
+    return distance  # mi/mile/miles/miels -> miles
 
 def offset_latlon_bearing(lat: float, lon: float, miles: float, bearing_deg: float):
+    # simple approximation good for small/moderate offsets
     miles_per_deg_lat = 69.0
     dlat = (miles / miles_per_deg_lat) * math.cos(math.radians(bearing_deg))
 
@@ -496,9 +526,8 @@ def resolve_location(description: str):
         direction = m.group("dir")
         place = m.group("place").strip()
 
-        miles = convert_to_miles(distance, unit)
-
         base_lat, base_lon, base_label = geocode_place(place)
+        miles = _to_miles(distance, unit)
         bearing = _dir_to_bearing(direction)
         lat, lon = offset_latlon_bearing(base_lat, base_lon, miles, bearing)
 
@@ -524,7 +553,7 @@ def nws_periods(lat, lon, hourly=False):
 st.set_page_config(page_title="Weather", layout="centered")
 st.title("Weather Forecast")
 
-location = st.text_input("Enter location", "200 km north of Fort Collins, CO")
+location = st.text_input("Enter location", "500 miles north of Fort Collins, CO")
 include_hourly = st.checkbox("Include hourly forecast", True)
 
 if st.button("Get Forecast", type="primary"):
