@@ -1,4 +1,7 @@
 import streamlit as st
+st.set_page_config(page_title="Weather (GPT-only)", layout="centered")
+
+import streamlit as st
 st.write("Secrets keys:", list(st.secrets.keys()))
 st.write("OpenAI block:", st.secrets.get("openai", {}))
 
