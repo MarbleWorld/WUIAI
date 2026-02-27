@@ -2723,6 +2723,259 @@
 
 
 
+# #!/usr/bin/env python3
+# # -*- coding: utf-8 -*-
+
+# """
+# Streamlit app: GPT-only weather lookup (via OpenAI Responses API + web_search tool)
+# + Geolocation (Photon primary, Nominatim fallback) + relative offsets.
+
+# Run:
+#   pip install streamlit requests openai
+#   set OPENAI_API_KEY=...
+#   streamlit run app.py
+
+# Notes:
+#   - This does NOT call api.weather.gov for forecast/alerts.
+#   - It uses web_search, so the model is synthesizing from live web sources.
+# """
+
+# import os
+# import re
+# import json
+# import time
+# import math
+# import requests
+# import streamlit as st
+
+# from openai import OpenAI
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # HEADERS
+# # ───────────────────────────────────────────────────────────────────────────────
+# USER_AGENT = "RCVFD-WeatherStreamlit-GPTOnly/1.0"
+# COMMON_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+
+# DEFAULT_WEB_DAYS = 2
+# DEFAULT_WEB_MODEL = "gpt-4.1-mini"
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # HTTP
+# # ───────────────────────────────────────────────────────────────────────────────
+# def _get_json(url, params=None, headers=None, timeout=30):
+#     r = requests.get(url, params=params, headers=headers or {}, timeout=timeout)
+#     r.raise_for_status()
+#     return r.json()
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # GEOCODING (Photon primary, Nominatim fallback) — NO EMAIL
+# # ───────────────────────────────────────────────────────────────────────────────
+# def geocode_photon(query: str):
+#     url = "https://photon.komoot.io/api/"
+#     params = {"q": query, "limit": 1}
+#     data = _get_json(url, params=params, headers=COMMON_HEADERS)
+
+#     feats = data.get("features") or []
+#     if not feats:
+#         raise RuntimeError("Photon returned no results.")
+
+#     feat = feats[0]
+#     props = feat.get("properties") or {}
+#     lon, lat = feat.get("geometry", {}).get("coordinates", [None, None])
+#     if lat is None or lon is None:
+#         raise RuntimeError("Photon result missing coordinates.")
+
+#     label_parts = []
+#     for k in ("name", "city", "state", "country"):
+#         v = props.get(k)
+#         if v and v not in label_parts:
+#             label_parts.append(v)
+#     label = ", ".join(label_parts) if label_parts else query
+
+#     return float(lat), float(lon), label
+
+# def geocode_nominatim(query: str):
+#     url = "https://nominatim.openstreetmap.org/search"
+#     params = {"q": query, "format": "json", "limit": 1, "addressdetails": 0}
+#     data = _get_json(url, params=params, headers=COMMON_HEADERS)
+
+#     if not data:
+#         raise RuntimeError("Nominatim returned no results.")
+
+#     lat = float(data[0]["lat"])
+#     lon = float(data[0]["lon"])
+#     name = data[0].get("display_name", query)
+#     return lat, lon, name
+
+# @st.cache_data(ttl=3600)
+# def geocode_place(query: str):
+#     try:
+#         return geocode_photon(query)
+#     except Exception:
+#         return geocode_nominatim(query)
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # RELATIVE LOCATION PARSING + OFFSETS (miles + km, diagonals, typo "miels")
+# # ───────────────────────────────────────────────────────────────────────────────
+# REL_RE = re.compile(
+#     r"""
+#     ^\s*
+#     (?P<distance>\d+(?:\.\d+)?)\s*
+#     (?P<unit>mi|mile|miles|miels|km|kms|kilometer|kilometers)\s*
+#     (?P<dir>north|south|east|west|n|s|e|w|ne|nw|se|sw|
+#             northeast|northwest|southeast|southwest)\s*
+#     of\s*
+#     (?P<place>.+?)\s*
+#     $
+#     """,
+#     re.IGNORECASE | re.VERBOSE,
+# )
+
+# def _dir_to_bearing(dir_str: str) -> float:
+#     d = dir_str.strip().lower()
+#     mapping = {
+#         "n": 0.0, "north": 0.0,
+#         "ne": 45.0, "northeast": 45.0,
+#         "e": 90.0, "east": 90.0,
+#         "se": 135.0, "southeast": 135.0,
+#         "s": 180.0, "south": 180.0,
+#         "sw": 225.0, "southwest": 225.0,
+#         "w": 270.0, "west": 270.0,
+#         "nw": 315.0, "northwest": 315.0,
+#     }
+#     if d not in mapping:
+#         raise ValueError(f"Unsupported direction: {dir_str}")
+#     return mapping[d]
+
+# def _to_miles(distance: float, unit: str) -> float:
+#     u = unit.strip().lower()
+#     if u in ("km", "kms", "kilometer", "kilometers"):
+#         return distance * 0.621371
+#     return distance
+
+# def offset_latlon_bearing(lat: float, lon: float, miles: float, bearing_deg: float):
+#     miles_per_deg_lat = 69.0
+#     dlat = (miles / miles_per_deg_lat) * math.cos(math.radians(bearing_deg))
+
+#     miles_per_deg_lon = 69.0 * max(0.01, abs(math.cos(math.radians(lat))))
+#     dlon = (miles / miles_per_deg_lon) * math.sin(math.radians(bearing_deg))
+
+#     return lat + dlat, lon + dlon
+
+# def resolve_location(description: str):
+#     s = (description or "").strip()
+#     if not s:
+#         raise ValueError("Location is empty.")
+
+#     m = REL_RE.match(s)
+#     if m:
+#         distance = float(m.group("distance"))
+#         unit = m.group("unit")
+#         direction = m.group("dir")
+#         place = m.group("place").strip()
+
+#         base_lat, base_lon, base_name = geocode_place(place)
+#         miles = _to_miles(distance, unit)
+#         bearing = _dir_to_bearing(direction)
+#         lat, lon = offset_latlon_bearing(base_lat, base_lon, miles, bearing)
+#         label = f"{distance:g} {unit} {direction.lower()} of {base_name}"
+#         return lat, lon, label
+
+#     lat, lon, name = geocode_place(s)
+#     return lat, lon, name
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # GPT WEB WEATHER ONLY
+# # ───────────────────────────────────────────────────────────────────────────────
+# @st.cache_data(ttl=900)
+# def gpt_web_weather(lat, lon, days=DEFAULT_WEB_DAYS, model=DEFAULT_WEB_MODEL):
+#     api_key = os.getenv("OPENAI_API_KEY", "").strip()
+#     if not api_key:
+#         raise RuntimeError("Set OPENAI_API_KEY in your environment.")
+#     client = OpenAI(api_key=api_key)
+
+#     prompt = f"""
+# Look up the weather forecast for coordinates ({lat:.6f}, {lon:.6f}) for the next {days} days.
+# Use web search. Prefer authoritative sources (NWS, NOAA, official forecast pages).
+# Return STRICT JSON with:
+# {{
+#   "location_name": "<best guess place name>",
+#   "forecast_summary": "<short summary>",
+#   "high_level_hazards": ["<wind>", "<snow>", "<red flag>", "..."],
+#   "periods": [
+#     {{
+#       "name": "<e.g., Today, Tonight, Mon>",
+#       "temp": "<value + units if available>",
+#       "wind": "<value + units/direction if available>",
+#       "precip": "<if available>",
+#       "summary": "<one sentence>"
+#     }}
+#   ]
+# }}
+# """.strip()
+
+#     resp = client.responses.create(
+#         model=model,
+#         input=prompt,
+#         tools=[{"type": "web_search"}],
+#     )
+
+#     out_text = getattr(resp, "output_text", None)
+#     if not out_text:
+#         out_text_parts = []
+#         for item in getattr(resp, "output", []) or []:
+#             if getattr(item, "type", "") == "message":
+#                 for c in getattr(item, "content", []) or []:
+#                     if getattr(c, "type", "") in ("output_text", "text"):
+#                         out_text_parts.append(getattr(c, "text", ""))
+#         out_text = "\n".join([t for t in out_text_parts if t]).strip()
+
+#     try:
+#         return json.loads(out_text)
+#     except Exception:
+#         raise RuntimeError(f"Model did not return valid JSON.\nRaw:\n{out_text}")
+
+# def build_report(location_str: str):
+#     lat, lon, label = resolve_location(location_str)
+#     ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+
+#     data = gpt_web_weather(lat, lon)
+
+#     out = []
+#     out.append("\n" + "=" * 96)
+#     out.append("FULL WEATHER REPORT (GPT web_search)")
+#     out.append("=" * 96)
+#     out.append(f"Input location     : {location_str}")
+#     out.append(f"Resolved location  : {label}")
+#     out.append(f"Coordinates        : {lat:.6f}, {lon:.6f}")
+#     out.append(f"Generated          : {ts}")
+#     out.append("-" * 96)
+#     out.append(json.dumps(data, indent=2))
+#     out.append("=" * 96 + "\n")
+#     return "\n".join(out)
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # STREAMLIT UI
+# # ───────────────────────────────────────────────────────────────────────────────
+# st.set_page_config(page_title="Weather (GPT-only)", layout="centered")
+# st.title("Weather Forecast (GPT-only)")
+
+# location = st.text_input("Enter location", "55 miles north of Fort Collins, CO")
+
+# if st.button("Get Forecast", type="primary"):
+#     try:
+#         with st.spinner("Fetching forecast (web_search)..."):
+#             report_text = build_report(location)
+#         st.text_area("Forecast report", value=report_text, height=780)
+#     except Exception as e:
+#         st.error(str(e))
+
+
+
+
+
+
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
@@ -2732,8 +2985,15 @@ Streamlit app: GPT-only weather lookup (via OpenAI Responses API + web_search to
 
 Run:
   pip install streamlit requests openai
-  set OPENAI_API_KEY=...
   streamlit run app.py
+
+Secrets / Env:
+  - Streamlit Cloud:
+      [openai]
+      api_key = "..."
+    or
+  - Local:
+      set OPENAI_API_KEY=...
 
 Notes:
   - This does NOT call api.weather.gov for forecast/alerts.
@@ -2753,7 +3013,7 @@ from openai import OpenAI
 # ───────────────────────────────────────────────────────────────────────────────
 # HEADERS
 # ───────────────────────────────────────────────────────────────────────────────
-USER_AGENT = "RCVFD-WeatherStreamlit-GPTOnly/1.0"
+USER_AGENT = "RCVFD-WeatherStreamlit-GPTOnly/1.1"
 COMMON_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 
 DEFAULT_WEB_DAYS = 2
@@ -2885,13 +3145,31 @@ def resolve_location(description: str):
     return lat, lon, name
 
 # ───────────────────────────────────────────────────────────────────────────────
+# OPENAI KEY RESOLUTION (secrets first, then env)
+# ───────────────────────────────────────────────────────────────────────────────
+def get_openai_api_key() -> str:
+    key = ""
+    try:
+        key = (st.secrets.get("openai", {}) or {}).get("api_key", "") or ""
+    except Exception:
+        key = ""
+    if not key:
+        key = os.getenv("OPENAI_API_KEY", "") or ""
+    key = str(key).strip()
+    if not key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. Add it to Streamlit secrets:\n"
+            "[openai]\napi_key = \"...\"\n"
+            "or set environment variable OPENAI_API_KEY."
+        )
+    return key
+
+# ───────────────────────────────────────────────────────────────────────────────
 # GPT WEB WEATHER ONLY
 # ───────────────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=900)
 def gpt_web_weather(lat, lon, days=DEFAULT_WEB_DAYS, model=DEFAULT_WEB_MODEL):
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("Set OPENAI_API_KEY in your environment.")
+    api_key = get_openai_api_key()
     client = OpenAI(api_key=api_key)
 
     prompt = f"""
