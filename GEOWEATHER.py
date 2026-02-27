@@ -3300,6 +3300,48 @@ def _get_json(url, params=None, headers=None, timeout=30):
     r.raise_for_status()
     return r.json()
 
+
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# OFFICIAL NWS API (Ground Truth)
+# ───────────────────────────────────────────────────────────────────────────────
+
+def nws_forecast_from_latlon(lat: float, lon: float):
+    try:
+        # Step 1: Get grid endpoint
+        points_url = f"https://api.weather.gov/points/{lat:.4f},{lon:.4f}"
+        points_data = _get_json(points_url, headers=COMMON_HEADERS)
+
+        forecast_url = points_data["properties"]["forecast"]
+
+        # Step 2: Get forecast periods
+        forecast_data = _get_json(forecast_url, headers=COMMON_HEADERS)
+
+        periods = forecast_data["properties"]["periods"]
+
+        # Simplify structure
+        simplified = []
+        for p in periods[:6]:  # limit to first 6 periods
+            simplified.append({
+                "name": p.get("name"),
+                "temperature": f"{p.get('temperature')} {p.get('temperatureUnit')}",
+                "wind": f"{p.get('windSpeed')} {p.get('windDirection')}",
+                "shortForecast": p.get("shortForecast")
+            })
+
+        return {
+            "ok": True,
+            "forecast_url": forecast_url,
+            "periods": simplified
+        }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e)
+        }
+
 # ───────────────────────────────────────────────────────────────────────────────
 # GEOCODING (Photon primary, Nominatim fallback) — NO EMAIL
 # ───────────────────────────────────────────────────────────────────────────────
@@ -3501,15 +3543,44 @@ Return STRICT JSON only (no markdown, no commentary) with:
     except Exception:
         return {"ok": True, "reason": "Model did not return valid JSON.", "json": None, "raw": raw}
 
+# def build_report(location_str: str, days=DEFAULT_WEB_DAYS, model=DEFAULT_WEB_MODEL):
+#     lat, lon, label = resolve_location(location_str)
+#     ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+
+#     res = gpt_web_weather(lat, lon, days=days, model=model)
+
+#     out = []
+#     out.append("\n" + "=" * 96)
+#     out.append("FULL WEATHER REPORT (GPT web_search)")
+#     out.append("=" * 96)
+#     out.append(f"Input location     : {location_str}")
+#     out.append(f"Resolved location  : {label}")
+#     out.append(f"Coordinates        : {lat:.6f}, {lon:.6f}")
+#     out.append(f"Generated          : {ts}")
+#     out.append("-" * 96)
+
+#     if not res.get("ok", False):
+#         out.append(f"[ERROR] {res.get('reason','')}")
+#     else:
+#         if res.get("json") is not None:
+#             out.append(json.dumps(res["json"], indent=2))
+#         else:
+#             out.append("[WARN] " + res.get("reason", ""))
+#             out.append(res.get("raw", "").strip() or "[No text returned]")
+
+#     out.append("=" * 96 + "\n")
+#     return "\n".join(out), {"lat": lat, "lon": lon, "label": label, "generated_utc": ts, "openai_ok": res.get("ok", False)}
+
 def build_report(location_str: str, days=DEFAULT_WEB_DAYS, model=DEFAULT_WEB_MODEL):
     lat, lon, label = resolve_location(location_str)
     ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
 
-    res = gpt_web_weather(lat, lon, days=days, model=model)
+    gpt_res = gpt_web_weather(lat, lon, days=days, model=model)
+    nws_res = nws_forecast_from_latlon(lat, lon)
 
     out = []
     out.append("\n" + "=" * 96)
-    out.append("FULL WEATHER REPORT (GPT web_search)")
+    out.append("WEATHER REPORT (GPT vs OFFICIAL NWS API)")
     out.append("=" * 96)
     out.append(f"Input location     : {location_str}")
     out.append(f"Resolved location  : {label}")
@@ -3517,17 +3588,35 @@ def build_report(location_str: str, days=DEFAULT_WEB_DAYS, model=DEFAULT_WEB_MOD
     out.append(f"Generated          : {ts}")
     out.append("-" * 96)
 
-    if not res.get("ok", False):
-        out.append(f"[ERROR] {res.get('reason','')}")
+    # ───── GPT BLOCK ─────
+    out.append("\n--- GPT (web_search) ---\n")
+    if not gpt_res.get("ok", False):
+        out.append(f"[GPT ERROR] {gpt_res.get('reason','')}")
     else:
-        if res.get("json") is not None:
-            out.append(json.dumps(res["json"], indent=2))
+        if gpt_res.get("json") is not None:
+            out.append(json.dumps(gpt_res["json"], indent=2))
         else:
-            out.append("[WARN] " + res.get("reason", ""))
-            out.append(res.get("raw", "").strip() or "[No text returned]")
+            out.append("[GPT RAW OUTPUT]")
+            out.append(gpt_res.get("raw", ""))
+
+    # ───── NWS BLOCK ─────
+    out.append("\n--- OFFICIAL NWS API ---\n")
+    if not nws_res.get("ok", False):
+        out.append(f"[NWS ERROR] {nws_res.get('error','')}")
+    else:
+        out.append(f"Forecast URL: {nws_res['forecast_url']}")
+        out.append(json.dumps(nws_res["periods"], indent=2))
 
     out.append("=" * 96 + "\n")
-    return "\n".join(out), {"lat": lat, "lon": lon, "label": label, "generated_utc": ts, "openai_ok": res.get("ok", False)}
+
+    return "\n".join(out), {
+        "lat": lat,
+        "lon": lon,
+        "label": label,
+        "generated_utc": ts,
+        "openai_ok": gpt_res.get("ok", False),
+        "nws_ok": nws_res.get("ok", False)
+    }
 
 # ───────────────────────────────────────────────────────────────────────────────
 # STREAMLIT UI
