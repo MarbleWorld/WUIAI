@@ -4206,27 +4206,616 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Streamlit app: Weather comparison (TRUE side-by-side)
+# """
+# Streamlit app: Weather comparison (TRUE side-by-side)
 
-Panels:
-  LEFT  : OFFICIAL NWS API (api.weather.gov) = ground truth
-  MIDDLE: GPT-normalized-to-NWS (grounded ONLY in the NWS periods)
-  RIGHT : GPT web_search (untrusted / best-effort)
+# Panels:
+#   LEFT  : OFFICIAL NWS API (api.weather.gov) = ground truth
+#   MIDDLE: GPT-normalized-to-NWS (grounded ONLY in the NWS periods)
+#   RIGHT : GPT web_search (untrusted / best-effort)
 
-Run:
-  pip install streamlit requests openai
-  streamlit run app.py
+# Run:
+#   pip install streamlit requests openai
+#   streamlit run app.py
 
-Secrets / Env:
-  - Streamlit Cloud:
-      [openai]
-      api_key = "..."
-    or
-      OPENAI_API_KEY = "..."
-  - Local:
-      set OPENAI_API_KEY=...
-"""
+# Secrets / Env:
+#   - Streamlit Cloud:
+#       [openai]
+#       api_key = "..."
+#     or
+#       OPENAI_API_KEY = "..."
+#   - Local:
+#       set OPENAI_API_KEY=...
+# """
+
+# import os
+# import re
+# import json
+# import time
+# import math
+# import requests
+# import streamlit as st
+# from openai import OpenAI
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # CONFIG
+# # ───────────────────────────────────────────────────────────────────────────────
+# USER_AGENT = "RCVFD-WeatherStreamlit-Compare/1.4"
+# COMMON_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+
+# DEFAULT_WEB_DAYS = 2
+# DEFAULT_WEB_MODEL = "gpt-4.1-mini"
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # HTTP
+# # ───────────────────────────────────────────────────────────────────────────────
+# def _get_json(url, params=None, headers=None, timeout=30):
+#     r = requests.get(url, params=params, headers=headers or {}, timeout=timeout)
+#     r.raise_for_status()
+#     return r.json()
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # OFFICIAL NWS API (Ground Truth)
+# # ───────────────────────────────────────────────────────────────────────────────
+# def nws_forecast_from_latlon(lat: float, lon: float, limit_periods: int = 10):
+#     """
+#     Returns:
+#       {
+#         ok: bool,
+#         points_url: str,
+#         forecast_url: str,
+#         periods: [
+#           {
+#             name: str,
+#             temperature: "68 F" or None,
+#             wind: "8 to 16 mph W" or None,
+#             shortForecast: str or None,
+#             detailedForecast: str or None
+#           }, ...
+#         ]
+#       }
+#     """
+#     try:
+#         points_url = f"https://api.weather.gov/points/{lat:.4f},{lon:.4f}"
+#         points_data = _get_json(points_url, headers=COMMON_HEADERS)
+
+#         forecast_url = points_data["properties"]["forecast"]
+#         forecast_data = _get_json(forecast_url, headers=COMMON_HEADERS)
+
+#         periods = (forecast_data.get("properties") or {}).get("periods") or []
+#         cleaned = []
+#         for p in periods[: max(1, int(limit_periods))]:
+#             temp = None
+#             if p.get("temperature") is not None and p.get("temperatureUnit"):
+#                 temp = f"{p.get('temperature')} {p.get('temperatureUnit')}"
+
+#             wind = None
+#             if p.get("windSpeed"):
+#                 wd = (p.get("windDirection") or "").strip()
+#                 wind = f"{p.get('windSpeed')} {wd}".strip()
+
+#             cleaned.append(
+#                 {
+#                     "name": p.get("name"),
+#                     "temperature": temp,
+#                     "wind": wind,
+#                     "shortForecast": p.get("shortForecast"),
+#                     "detailedForecast": p.get("detailedForecast"),
+#                 }
+#             )
+
+#         return {
+#             "ok": True,
+#             "points_url": points_url,
+#             "forecast_url": forecast_url,
+#             "periods": cleaned,
+#         }
+
+#     except Exception as e:
+#         return {"ok": False, "error": str(e)}
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # GEOCODING (Photon primary, Nominatim fallback) — NO EMAIL
+# # ───────────────────────────────────────────────────────────────────────────────
+# def geocode_photon(query: str):
+#     url = "https://photon.komoot.io/api/"
+#     params = {"q": query, "limit": 1}
+#     data = _get_json(url, params=params, headers=COMMON_HEADERS)
+
+#     feats = data.get("features") or []
+#     if not feats:
+#         raise RuntimeError("Photon returned no results.")
+
+#     feat = feats[0]
+#     props = feat.get("properties") or {}
+#     lon, lat = feat.get("geometry", {}).get("coordinates", [None, None])
+#     if lat is None or lon is None:
+#         raise RuntimeError("Photon result missing coordinates.")
+
+#     label_parts = []
+#     for k in ("name", "city", "state", "country"):
+#         v = props.get(k)
+#         if v and v not in label_parts:
+#             label_parts.append(v)
+#     label = ", ".join(label_parts) if label_parts else query
+
+#     return float(lat), float(lon), label
+
+
+# def geocode_nominatim(query: str):
+#     url = "https://nominatim.openstreetmap.org/search"
+#     params = {"q": query, "format": "json", "limit": 1, "addressdetails": 0}
+#     data = _get_json(url, params=params, headers=COMMON_HEADERS)
+
+#     if not data:
+#         raise RuntimeError("Nominatim returned no results.")
+
+#     lat = float(data[0]["lat"])
+#     lon = float(data[0]["lon"])
+#     name = data[0].get("display_name", query)
+#     return lat, lon, name
+
+
+# @st.cache_data(ttl=3600, show_spinner=False)
+# def geocode_place(query: str):
+#     try:
+#         return geocode_photon(query)
+#     except Exception:
+#         return geocode_nominatim(query)
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # RELATIVE LOCATION PARSING + OFFSETS
+# # ───────────────────────────────────────────────────────────────────────────────
+# REL_RE = re.compile(
+#     r"""
+#     ^\s*
+#     (?P<distance>\d+(?:\.\d+)?)\s*
+#     (?P<unit>mi|mile|miles|miels|km|kms|kilometer|kilometers)\s*
+#     (?P<dir>north|south|east|west|n|s|e|w|ne|nw|se|sw|
+#             northeast|northwest|southeast|southwest)\s*
+#     of\s*
+#     (?P<place>.+?)\s*
+#     $
+#     """,
+#     re.IGNORECASE | re.VERBOSE,
+# )
+
+
+# def _dir_to_bearing(dir_str: str) -> float:
+#     d = dir_str.strip().lower()
+#     mapping = {
+#         "n": 0.0,
+#         "north": 0.0,
+#         "ne": 45.0,
+#         "northeast": 45.0,
+#         "e": 90.0,
+#         "east": 90.0,
+#         "se": 135.0,
+#         "southeast": 135.0,
+#         "s": 180.0,
+#         "south": 180.0,
+#         "sw": 225.0,
+#         "southwest": 225.0,
+#         "w": 270.0,
+#         "west": 270.0,
+#         "nw": 315.0,
+#         "northwest": 315.0,
+#     }
+#     if d not in mapping:
+#         raise ValueError(f"Unsupported direction: {dir_str}")
+#     return mapping[d]
+
+
+# def _to_miles(distance: float, unit: str) -> float:
+#     u = unit.strip().lower()
+#     if u in ("km", "kms", "kilometer", "kilometers"):
+#         return distance * 0.621371
+#     return distance
+
+
+# def offset_latlon_bearing(lat: float, lon: float, miles: float, bearing_deg: float):
+#     miles_per_deg_lat = 69.0
+#     dlat = (miles / miles_per_deg_lat) * math.cos(math.radians(bearing_deg))
+
+#     miles_per_deg_lon = 69.0 * max(0.01, abs(math.cos(math.radians(lat))))
+#     dlon = (miles / miles_per_deg_lon) * math.sin(math.radians(bearing_deg))
+
+#     return lat + dlat, lon + dlon
+
+
+# def resolve_location(description: str):
+#     s = (description or "").strip()
+#     if not s:
+#         raise ValueError("Location is empty.")
+
+#     m = REL_RE.match(s)
+#     if m:
+#         distance = float(m.group("distance"))
+#         unit = m.group("unit")
+#         direction = m.group("dir")
+#         place = m.group("place").strip()
+
+#         base_lat, base_lon, base_name = geocode_place(place)
+#         miles = _to_miles(distance, unit)
+#         bearing = _dir_to_bearing(direction)
+#         lat, lon = offset_latlon_bearing(base_lat, base_lon, miles, bearing)
+#         label = f"{distance:g} {unit} {direction.lower()} of {base_name}"
+#         return lat, lon, label
+
+#     lat, lon, name = geocode_place(s)
+#     return lat, lon, name
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # OPENAI (Responses API)
+# # ───────────────────────────────────────────────────────────────────────────────
+# def _get_openai_api_key():
+#     try:
+#         if "openai" in st.secrets and "api_key" in st.secrets["openai"]:
+#             v = str(st.secrets["openai"]["api_key"]).strip()
+#             if v:
+#                 return v
+#     except Exception:
+#         pass
+
+#     try:
+#         if "OPENAI_API_KEY" in st.secrets:
+#             v = str(st.secrets["OPENAI_API_KEY"]).strip()
+#             if v:
+#                 return v
+#     except Exception:
+#         pass
+
+#     return os.getenv("OPENAI_API_KEY", "").strip()
+
+
+# def _openai_client():
+#     api_key = _get_openai_api_key()
+#     if not api_key:
+#         return None
+#     return OpenAI(api_key=api_key)
+
+
+# def _extract_output_text(resp) -> str:
+#     out_text = getattr(resp, "output_text", None)
+#     if out_text:
+#         return str(out_text).strip()
+
+#     parts = []
+#     for item in getattr(resp, "output", []) or []:
+#         if getattr(item, "type", "") == "message":
+#             for c in getattr(item, "content", []) or []:
+#                 ctype = getattr(c, "type", "")
+#                 if ctype in ("output_text", "text"):
+#                     parts.append(getattr(c, "text", ""))
+#     return "\n".join([p for p in parts if p]).strip()
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # GPT via web_search (UNTRUSTED)
+# # ───────────────────────────────────────────────────────────────────────────────
+# @st.cache_data(ttl=900, show_spinner=False)
+# def gpt_web_weather(lat, lon, days=DEFAULT_WEB_DAYS, model=DEFAULT_WEB_MODEL):
+#     client = _openai_client()
+#     if client is None:
+#         return {"ok": False, "reason": "OPENAI_API_KEY not set (env or Streamlit secrets).", "json": None, "raw": ""}
+
+#     prompt = f"""
+# Look up the weather forecast for coordinates ({lat:.6f}, {lon:.6f}) for the next {days} days.
+# Use web search. Prefer authoritative sources (NWS/NOAA, official forecast pages).
+# Return STRICT JSON only (no markdown, no commentary) with:
+# {{
+#   "location_name": "<best guess place name>",
+#   "forecast_summary": "<short summary>",
+#   "high_level_hazards": ["<wind>", "<snow>", "<red flag>", "..."],
+#   "periods": [
+#     {{
+#       "name": "<e.g., Today, Tonight, Mon>",
+#       "temperature": "<value + units if available>",
+#       "wind": "<value + units/direction if available>",
+#       "shortForecast": "<short forecast phrase>",
+#       "notes": "<optional short note>"
+#     }}
+#   ],
+#   "sources": ["<site name 1>", "<site name 2>", "..."]
+# }}
+# """.strip()
+
+#     resp = client.responses.create(
+#         model=model,
+#         input=prompt,
+#         tools=[{"type": "web_search"}],
+#     )
+
+#     raw = _extract_output_text(resp)
+#     try:
+#         data = json.loads(raw)
+#         return {"ok": True, "reason": "", "json": data, "raw": raw}
+#     except Exception:
+#         return {"ok": True, "reason": "Model did not return valid JSON.", "json": None, "raw": raw}
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # GPT normalize to NWS periods (GROUNDED in NWS API output)
+# # ───────────────────────────────────────────────────────────────────────────────
+# @st.cache_data(ttl=900, show_spinner=False)
+# def gpt_normalize_to_nws(nws_periods, location_label, model=DEFAULT_WEB_MODEL):
+#     client = _openai_client()
+#     if client is None:
+#         return {"ok": False, "reason": "OPENAI_API_KEY not set (env or Streamlit secrets).", "json": None, "raw": ""}
+
+#     payload = {"location": location_label, "periods": nws_periods}
+
+#     prompt = f"""
+# You are given OFFICIAL National Weather Service (api.weather.gov) forecast periods for a location.
+
+# Return STRICT JSON ONLY (no markdown) with:
+# {{
+#   "summary": "<1-2 sentences derived ONLY from input periods>",
+#   "periods": [
+#     {{
+#       "name": "<EXACTLY as input>",
+#       "temperature": "<copy input temperature or null>",
+#       "wind": "<copy input wind or null>",
+#       "shortForecast": "<copy input shortForecast or null>",
+#       "hazards": ["..."],   // ONLY if explicitly supported by input text; else []
+#       "notes": "<optional short note derived ONLY from input; else ''>"
+#     }}
+#   ]
+# }}
+
+# RULES:
+# - Do NOT add new meteorology not present in the input.
+# - Do NOT change period names.
+
+# Input JSON:
+# {json.dumps(payload, ensure_ascii=False)}
+# """.strip()
+
+#     resp = client.responses.create(
+#         model=model,
+#         input=prompt,
+#     )
+
+#     raw = _extract_output_text(resp)
+#     try:
+#         data = json.loads(raw)
+#         return {"ok": True, "reason": "", "json": data, "raw": raw}
+#     except Exception:
+#         return {"ok": True, "reason": "Model did not return valid JSON.", "json": None, "raw": raw}
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # ALIGNMENT + SIDE-BY-SIDE TABLE
+# # ───────────────────────────────────────────────────────────────────────────────
+# def _index_by_name(periods):
+#     return {p.get("name"): p for p in (periods or []) if p.get("name")}
+
+# def build_side_by_side_rows(nws_periods, gpt_norm_periods, gpt_web_periods):
+#     gptn = _index_by_name(gpt_norm_periods)
+#     gptw = _index_by_name(gpt_web_periods)
+
+#     rows = []
+#     for n in nws_periods or []:
+#         name = n.get("name")
+
+#         pn = gptn.get(name, {})
+#         pw = gptw.get(name, {})
+
+#         rows.append(
+#             {
+#                 "Period": name,
+#                 "NWS temp": n.get("temperature"),
+#                 "GPT(norm) temp": pn.get("temperature"),
+#                 "GPT(web) temp": pw.get("temperature"),
+#                 "NWS wind": n.get("wind"),
+#                 "GPT(norm) wind": pn.get("wind"),
+#                 "GPT(web) wind": pw.get("wind"),
+#                 "NWS short": n.get("shortForecast"),
+#                 "GPT(norm) short": pn.get("shortForecast"),
+#                 "GPT(web) short": pw.get("shortForecast"),
+#                 "GPT(norm) hazards": ", ".join(pn.get("hazards", []) or []),
+#                 "GPT(web) hazards": ", ".join((gpt_web_periods and []) or []),  # placeholder; web hazards are usually top-level
+#                 "GPT(norm) notes": pn.get("notes", ""),
+#                 "GPT(web) notes": pw.get("notes", ""),
+#             }
+#         )
+#     return rows
+
+# def build_report(location_str: str, days=DEFAULT_WEB_DAYS, model=DEFAULT_WEB_MODEL):
+#     lat, lon, label = resolve_location(location_str)
+#     ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+
+#     nws_res = nws_forecast_from_latlon(lat, lon, limit_periods=10)
+#     gpt_web_res = gpt_web_weather(lat, lon, days=days, model=model)
+
+#     if nws_res.get("ok", False):
+#         gpt_norm_res = gpt_normalize_to_nws(nws_res["periods"], label, model=model)
+#     else:
+#         gpt_norm_res = {"ok": False, "reason": "Skipped because NWS API failed.", "json": None, "raw": ""}
+
+#     return {
+#         "lat": lat,
+#         "lon": lon,
+#         "label": label,
+#         "generated_utc": ts,
+#         "nws": nws_res,
+#         "gpt_norm": gpt_norm_res,
+#         "gpt_web": gpt_web_res,
+#         "model": model,
+#         "days": int(days),
+#     }
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # STREAMLIT UI
+# # ───────────────────────────────────────────────────────────────────────────────
+# st.set_page_config(page_title="Weather (Side-by-Side)", layout="wide")
+# st.title("Weather Forecast (Side-by-Side)")
+# st.caption('Examples: "Fort Collins, CO" | "55 miles north of Fort Collins, CO" | "200 km SW of Denver, CO"')
+
+# with st.expander("Debug: OpenAI key detection", expanded=False):
+#     secrets_keys = []
+#     try:
+#         secrets_keys = list(st.secrets.keys())
+#     except Exception:
+#         secrets_keys = []
+#     st.write("Secrets keys:", secrets_keys)
+
+#     openai_block = {}
+#     try:
+#         openai_block = dict(st.secrets.get("openai", {}))
+#         if "api_key" in openai_block:
+#             openai_block["api_key"] = "****"
+#     except Exception:
+#         openai_block = {}
+#     st.write("OpenAI block:", openai_block)
+
+#     try:
+#         st.write("Top-level OPENAI_API_KEY present:", "OPENAI_API_KEY" in st.secrets)
+#     except Exception:
+#         st.write("Top-level OPENAI_API_KEY present:", False)
+
+#     st.write("Env OPENAI_API_KEY set:", bool(os.getenv("OPENAI_API_KEY", "").strip()))
+#     st.write("Resolved key available:", bool(_get_openai_api_key()))
+
+# location = st.text_input("Location", value="4 miles north of Fort Collins, CO")
+
+# c1, c2, c3 = st.columns([1, 1, 1])
+# with c1:
+#     days = st.number_input("Days (GPT web_search only)", min_value=1, max_value=7, value=int(DEFAULT_WEB_DAYS), step=1)
+# with c2:
+#     model = st.text_input("Model", value=DEFAULT_WEB_MODEL)
+# with c3:
+#     limit_periods = st.number_input("NWS periods to show", min_value=4, max_value=20, value=10, step=1)
+
+# if st.button("Get forecast", type="primary"):
+#     try:
+#         with st.spinner("Fetching NWS + GPT..."):
+#             res = build_report(location_str=location, days=int(days), model=str(model).strip() or DEFAULT_WEB_MODEL)
+
+#             # apply limit periods to displayed NWS list
+#             nws_ok = res["nws"].get("ok", False)
+#             if nws_ok:
+#                 res["nws"]["periods"] = (res["nws"]["periods"] or [])[: int(limit_periods)]
+
+#         st.success(f"Resolved: {res['label']} ({res['lat']:.4f}, {res['lon']:.4f})  |  Generated: {res['generated_utc']}")
+
+#         # ────────────────────────────────────────────────────────────────────
+#         # SIDE-BY-SIDE PANELS (3 columns)
+#         # ────────────────────────────────────────────────────────────────────
+#         colA, colB, colC = st.columns(3)
+
+#         # LEFT: NWS
+#         with colA:
+#             st.subheader("OFFICIAL NWS API")
+#             if not res["nws"].get("ok", False):
+#                 st.error(res["nws"].get("error", "NWS error"))
+#             else:
+#                 st.caption("API endpoints used:")
+#                 st.code(res["nws"].get("points_url", ""), language="text")
+#                 st.code(res["nws"].get("forecast_url", ""), language="text")
+#                 st.dataframe(
+#                     [
+#                         {
+#                             "name": p.get("name"),
+#                             "temperature": p.get("temperature"),
+#                             "wind": p.get("wind"),
+#                             "shortForecast": p.get("shortForecast"),
+#                         }
+#                         for p in (res["nws"].get("periods") or [])
+#                     ],
+#                     use_container_width=True,
+#                     hide_index=True,
+#                 )
+
+#         # MIDDLE: GPT normalized to NWS
+#         with colB:
+#             st.subheader("GPT (Normalized to NWS)")
+#             if not res["gpt_norm"].get("ok", False):
+#                 st.error(res["gpt_norm"].get("reason", "GPT normalize error"))
+#             else:
+#                 if res["gpt_norm"].get("json") is None:
+#                     st.warning(res["gpt_norm"].get("reason", "No JSON"))
+#                     st.code(res["gpt_norm"].get("raw", ""), language="text")
+#                 else:
+#                     st.caption("Summary (derived ONLY from NWS periods):")
+#                     st.write(res["gpt_norm"]["json"].get("summary", ""))
+#                     st.dataframe(
+#                         [
+#                             {
+#                                 "name": p.get("name"),
+#                                 "temperature": p.get("temperature"),
+#                                 "wind": p.get("wind"),
+#                                 "shortForecast": p.get("shortForecast"),
+#                                 "hazards": ", ".join(p.get("hazards", []) or []),
+#                                 "notes": p.get("notes", ""),
+#                             }
+#                             for p in (res["gpt_norm"]["json"].get("periods") or [])
+#                         ],
+#                         use_container_width=True,
+#                         hide_index=True,
+#                     )
+
+#         # RIGHT: GPT web_search
+#         with colC:
+#             st.subheader("GPT (web_search; untrusted)")
+#             if not res["gpt_web"].get("ok", False):
+#                 st.error(res["gpt_web"].get("reason", "GPT web error"))
+#             else:
+#                 if res["gpt_web"].get("json") is None:
+#                     st.warning(res["gpt_web"].get("reason", "No JSON"))
+#                     st.code(res["gpt_web"].get("raw", ""), language="text")
+#                 else:
+#                     j = res["gpt_web"]["json"]
+#                     st.caption("Summary (from web content):")
+#                     st.write(j.get("forecast_summary", ""))
+#                     st.caption("Sources:")
+#                     st.write(j.get("sources", []))
+#                     st.dataframe(
+#                         [
+#                             {
+#                                 "name": p.get("name"),
+#                                 "temperature": p.get("temperature"),
+#                                 "wind": p.get("wind"),
+#                                 "shortForecast": p.get("shortForecast"),
+#                                 "notes": p.get("notes", ""),
+#                             }
+#                             for p in (j.get("periods") or [])
+#                         ],
+#                         use_container_width=True,
+#                         hide_index=True,
+#                     )
+
+#         st.divider()
+
+#         # ────────────────────────────────────────────────────────────────────
+#         # ONE unified side-by-side comparison table aligned by NWS period names
+#         # ────────────────────────────────────────────────────────────────────
+#         st.subheader("Direct Comparison (Aligned by NWS period name)")
+
+#         if res["nws"].get("ok", False):
+#             nws_periods = res["nws"].get("periods") or []
+#             gpt_norm_periods = []
+#             if res["gpt_norm"].get("ok", False) and res["gpt_norm"].get("json"):
+#                 gpt_norm_periods = res["gpt_norm"]["json"].get("periods") or []
+#             gpt_web_periods = []
+#             if res["gpt_web"].get("ok", False) and res["gpt_web"].get("json"):
+#                 gpt_web_periods = res["gpt_web"]["json"].get("periods") or []
+
+#             rows = build_side_by_side_rows(nws_periods, gpt_norm_periods, gpt_web_periods)
+#             st.dataframe(rows, use_container_width=True, hide_index=True)
+#         else:
+#             st.warning("No comparison table available because the NWS API failed.")
+
+#     except requests.HTTPError as e:
+#         st.error(f"HTTP error: {e}")
+#     except Exception as e:
+#         st.error(str(e))
+
+
+
+
+
+
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 import os
 import re
@@ -4240,11 +4829,15 @@ from openai import OpenAI
 # ───────────────────────────────────────────────────────────────────────────────
 # CONFIG
 # ───────────────────────────────────────────────────────────────────────────────
-USER_AGENT = "RCVFD-WeatherStreamlit-Compare/1.4"
+USER_AGENT = "RCVFD-WeatherStreamlit-Compare/1.5"
 COMMON_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 
 DEFAULT_WEB_DAYS = 2
 DEFAULT_WEB_MODEL = "gpt-4.1-mini"
+
+# If True: GPT gets ONLY the template/skeleton (period names + field names), NOT the values.
+# If False: GPT gets full NWS values (your old "GPT(norm)" behavior).
+GPT_SEES_ONLY_FORM = True
 
 # ───────────────────────────────────────────────────────────────────────────────
 # HTTP
@@ -4501,6 +5094,7 @@ def gpt_web_weather(lat, lon, days=DEFAULT_WEB_DAYS, model=DEFAULT_WEB_MODEL):
     prompt = f"""
 Look up the weather forecast for coordinates ({lat:.6f}, {lon:.6f}) for the next {days} days.
 Use web search. Prefer authoritative sources (NWS/NOAA, official forecast pages).
+
 Return STRICT JSON only (no markdown, no commentary) with:
 {{
   "location_name": "<best guess place name>",
@@ -4508,7 +5102,7 @@ Return STRICT JSON only (no markdown, no commentary) with:
   "high_level_hazards": ["<wind>", "<snow>", "<red flag>", "..."],
   "periods": [
     {{
-      "name": "<e.g., Today, Tonight, Mon>",
+      "name": "<period label you found (e.g., Today, Tonight, Saturday)>",
       "temperature": "<value + units if available>",
       "wind": "<value + units/direction if available>",
       "shortForecast": "<short forecast phrase>",
@@ -4533,45 +5127,86 @@ Return STRICT JSON only (no markdown, no commentary) with:
         return {"ok": True, "reason": "Model did not return valid JSON.", "json": None, "raw": raw}
 
 # ───────────────────────────────────────────────────────────────────────────────
-# GPT normalize to NWS periods (GROUNDED in NWS API output)
+# GPT "FORM-ONLY" NORMALIZATION (NO NWS VALUES ARE PASSED)
+#   Goal: enforce the same period names / structure as NWS, while forcing GPT to
+#   fill values from web_search (NOT from NWS API).
 # ───────────────────────────────────────────────────────────────────────────────
+def _nws_form_skeleton(nws_periods):
+    skel = []
+    for p in nws_periods or []:
+        skel.append(
+            {
+                "name": p.get("name"),
+                "temperature": None,
+                "wind": None,
+                "shortForecast": None,
+                "notes": "",
+            }
+        )
+    return skel
+
+
 @st.cache_data(ttl=900, show_spinner=False)
-def gpt_normalize_to_nws(nws_periods, location_label, model=DEFAULT_WEB_MODEL):
+def gpt_web_to_nws_form(lat, lon, nws_period_names, days=DEFAULT_WEB_DAYS, model=DEFAULT_WEB_MODEL):
+    """
+    GPT sees ONLY:
+      - lat/lon
+      - list of NWS period names (structure target)
+    GPT must use web_search to fill fields for those same names.
+    """
     client = _openai_client()
     if client is None:
         return {"ok": False, "reason": "OPENAI_API_KEY not set (env or Streamlit secrets).", "json": None, "raw": ""}
 
-    payload = {"location": location_label, "periods": nws_periods}
+    payload = {
+        "target_period_names": nws_period_names,
+        "schema": {
+            "name": "string (must be exactly one of target_period_names)",
+            "temperature": "string or null",
+            "wind": "string or null",
+            "shortForecast": "string or null",
+            "notes": "string (optional)",
+        },
+    }
 
     prompt = f"""
-You are given OFFICIAL National Weather Service (api.weather.gov) forecast periods for a location.
+You will compare an OFFICIAL NWS API forecast later, but you MUST NOT use any NWS API values.
+You are only given a list of target period names to match.
 
-Return STRICT JSON ONLY (no markdown) with:
+Task:
+- Use web search to find the forecast for coordinates ({lat:.6f}, {lon:.6f}).
+- Return STRICT JSON ONLY (no markdown) matching this structure EXACTLY:
+
 {{
-  "summary": "<1-2 sentences derived ONLY from input periods>",
+  "location_name": "<best guess place name>",
+  "forecast_summary": "<1-2 sentences>",
+  "high_level_hazards": ["..."],
   "periods": [
     {{
-      "name": "<EXACTLY as input>",
-      "temperature": "<copy input temperature or null>",
-      "wind": "<copy input wind or null>",
-      "shortForecast": "<copy input shortForecast or null>",
-      "hazards": ["..."],   // ONLY if explicitly supported by input text; else []
-      "notes": "<optional short note derived ONLY from input; else ''>"
+      "name": "<MUST be exactly one of the target period names>",
+      "temperature": "<string or null>",
+      "wind": "<string or null>",
+      "shortForecast": "<string or null>",
+      "notes": "<optional string>"
     }}
-  ]
+  ],
+  "sources": ["..."]
 }}
 
-RULES:
-- Do NOT add new meteorology not present in the input.
-- Do NOT change period names.
+Rules:
+- You MUST output one period object for EACH name in target_period_names (same count).
+- The "name" field must match EXACTLY (case + spacing) the provided names.
+- If you cannot find a value, use null.
+- Do NOT invent values you cannot support from the web results.
 
-Input JSON:
+Target JSON (names + schema):
 {json.dumps(payload, ensure_ascii=False)}
 """.strip()
 
     resp = client.responses.create(
         model=model,
         input=prompt,
+        tools=[{"type": "web_search"}],
     )
 
     raw = _extract_output_text(resp)
@@ -4582,53 +5217,66 @@ Input JSON:
         return {"ok": True, "reason": "Model did not return valid JSON.", "json": None, "raw": raw}
 
 # ───────────────────────────────────────────────────────────────────────────────
-# ALIGNMENT + SIDE-BY-SIDE TABLE
+# ALIGNMENT + DIRECT COMPARISON TABLE (NWS period names as the join key)
 # ───────────────────────────────────────────────────────────────────────────────
 def _index_by_name(periods):
     return {p.get("name"): p for p in (periods or []) if p.get("name")}
 
-def build_side_by_side_rows(nws_periods, gpt_norm_periods, gpt_web_periods):
-    gptn = _index_by_name(gpt_norm_periods)
+def build_side_by_side_rows(nws_periods, gpt_form_periods, gpt_web_periods):
+    gptf = _index_by_name(gpt_form_periods)
     gptw = _index_by_name(gpt_web_periods)
 
     rows = []
     for n in nws_periods or []:
         name = n.get("name")
 
-        pn = gptn.get(name, {})
+        pf = gptf.get(name, {})
         pw = gptw.get(name, {})
 
         rows.append(
             {
                 "Period": name,
-                "NWS temp": n.get("temperature"),
-                "GPT(norm) temp": pn.get("temperature"),
-                "GPT(web) temp": pw.get("temperature"),
+
+                "NWS temperature": n.get("temperature"),
+                "GPT(form) temperature": pf.get("temperature"),
+                "GPT(web) temperature": pw.get("temperature"),
+
                 "NWS wind": n.get("wind"),
-                "GPT(norm) wind": pn.get("wind"),
+                "GPT(form) wind": pf.get("wind"),
                 "GPT(web) wind": pw.get("wind"),
-                "NWS short": n.get("shortForecast"),
-                "GPT(norm) short": pn.get("shortForecast"),
-                "GPT(web) short": pw.get("shortForecast"),
-                "GPT(norm) hazards": ", ".join(pn.get("hazards", []) or []),
-                "GPT(web) hazards": ", ".join((gpt_web_periods and []) or []),  # placeholder; web hazards are usually top-level
-                "GPT(norm) notes": pn.get("notes", ""),
+
+                "NWS shortForecast": n.get("shortForecast"),
+                "GPT(form) shortForecast": pf.get("shortForecast"),
+                "GPT(web) shortForecast": pw.get("shortForecast"),
+
+                "NWS detailedForecast": (n.get("detailedForecast") or "")[:160] + ("…" if (n.get("detailedForecast") or "").__len__() > 160 else ""),
+                "GPT(form) notes": pf.get("notes", ""),
                 "GPT(web) notes": pw.get("notes", ""),
             }
         )
     return rows
 
-def build_report(location_str: str, days=DEFAULT_WEB_DAYS, model=DEFAULT_WEB_MODEL):
+# ───────────────────────────────────────────────────────────────────────────────
+# REPORT BUILD
+# ───────────────────────────────────────────────────────────────────────────────
+def build_report(location_str: str, days=DEFAULT_WEB_DAYS, model=DEFAULT_WEB_MODEL, limit_periods: int = 10):
     lat, lon, label = resolve_location(location_str)
     ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
 
-    nws_res = nws_forecast_from_latlon(lat, lon, limit_periods=10)
-    gpt_web_res = gpt_web_weather(lat, lon, days=days, model=model)
+    nws_res = nws_forecast_from_latlon(lat, lon, limit_periods=int(limit_periods))
+    gpt_web_res = gpt_web_weather(lat, lon, days=int(days), model=model)
 
     if nws_res.get("ok", False):
-        gpt_norm_res = gpt_normalize_to_nws(nws_res["periods"], label, model=model)
+        nws_periods = (nws_res.get("periods") or [])
+        nws_names = [p.get("name") for p in nws_periods if p.get("name")]
+
+        if GPT_SEES_ONLY_FORM:
+            gpt_form_res = gpt_web_to_nws_form(lat, lon, nws_names, days=int(days), model=model)
+        else:
+            # fallback: old behavior (not used for your goal)
+            gpt_form_res = {"ok": False, "reason": "GPT_SEES_ONLY_FORM is False (no form-only run).", "json": None, "raw": ""}
     else:
-        gpt_norm_res = {"ok": False, "reason": "Skipped because NWS API failed.", "json": None, "raw": ""}
+        gpt_form_res = {"ok": False, "reason": "Skipped because NWS API failed.", "json": None, "raw": ""}
 
     return {
         "lat": lat,
@@ -4636,18 +5284,19 @@ def build_report(location_str: str, days=DEFAULT_WEB_DAYS, model=DEFAULT_WEB_MOD
         "label": label,
         "generated_utc": ts,
         "nws": nws_res,
-        "gpt_norm": gpt_norm_res,
+        "gpt_form": gpt_form_res,
         "gpt_web": gpt_web_res,
         "model": model,
         "days": int(days),
+        "limit_periods": int(limit_periods),
     }
 
 # ───────────────────────────────────────────────────────────────────────────────
 # STREAMLIT UI
 # ───────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Weather (Side-by-Side)", layout="wide")
-st.title("Weather Forecast (Side-by-Side)")
-st.caption('Examples: "Fort Collins, CO" | "55 miles north of Fort Collins, CO" | "200 km SW of Denver, CO"')
+st.set_page_config(page_title="Weather (Form vs Data)", layout="wide")
+st.title("Weather Forecast: NWS API vs GPT(web) vs GPT(form-only)")
+st.caption('Goal: prove GPT(form-only) gets ONLY period names/schema, NOT NWS values.')
 
 with st.expander("Debug: OpenAI key detection", expanded=False):
     secrets_keys = []
@@ -4678,7 +5327,7 @@ location = st.text_input("Location", value="4 miles north of Fort Collins, CO")
 
 c1, c2, c3 = st.columns([1, 1, 1])
 with c1:
-    days = st.number_input("Days (GPT web_search only)", min_value=1, max_value=7, value=int(DEFAULT_WEB_DAYS), step=1)
+    days = st.number_input("Days (GPT web_search)", min_value=1, max_value=7, value=int(DEFAULT_WEB_DAYS), step=1)
 with c2:
     model = st.text_input("Model", value=DEFAULT_WEB_MODEL)
 with c3:
@@ -4687,23 +5336,15 @@ with c3:
 if st.button("Get forecast", type="primary"):
     try:
         with st.spinner("Fetching NWS + GPT..."):
-            res = build_report(location_str=location, days=int(days), model=str(model).strip() or DEFAULT_WEB_MODEL)
-
-            # apply limit periods to displayed NWS list
-            nws_ok = res["nws"].get("ok", False)
-            if nws_ok:
-                res["nws"]["periods"] = (res["nws"]["periods"] or [])[: int(limit_periods)]
+            res = build_report(location_str=location, days=int(days), model=str(model).strip() or DEFAULT_WEB_MODEL, limit_periods=int(limit_periods))
 
         st.success(f"Resolved: {res['label']} ({res['lat']:.4f}, {res['lon']:.4f})  |  Generated: {res['generated_utc']}")
 
-        # ────────────────────────────────────────────────────────────────────
-        # SIDE-BY-SIDE PANELS (3 columns)
-        # ────────────────────────────────────────────────────────────────────
         colA, colB, colC = st.columns(3)
 
         # LEFT: NWS
         with colA:
-            st.subheader("OFFICIAL NWS API")
+            st.subheader("OFFICIAL NWS API (ground truth)")
             if not res["nws"].get("ok", False):
                 st.error(res["nws"].get("error", "NWS error"))
             else:
@@ -4724,18 +5365,23 @@ if st.button("Get forecast", type="primary"):
                     hide_index=True,
                 )
 
-        # MIDDLE: GPT normalized to NWS
+        # MIDDLE: GPT(form-only)
         with colB:
-            st.subheader("GPT (Normalized to NWS)")
-            if not res["gpt_norm"].get("ok", False):
-                st.error(res["gpt_norm"].get("reason", "GPT normalize error"))
+            st.subheader("GPT(form-only; web_search)")
+            st.caption("GPT receives ONLY NWS period NAMES + schema (no values) and must fill via web_search.")
+            gf = res["gpt_form"]
+            if not gf.get("ok", False):
+                st.error(gf.get("reason", "GPT form-only error"))
             else:
-                if res["gpt_norm"].get("json") is None:
-                    st.warning(res["gpt_norm"].get("reason", "No JSON"))
-                    st.code(res["gpt_norm"].get("raw", ""), language="text")
+                if gf.get("json") is None:
+                    st.warning(gf.get("reason", "No JSON"))
+                    st.code(gf.get("raw", ""), language="text")
                 else:
-                    st.caption("Summary (derived ONLY from NWS periods):")
-                    st.write(res["gpt_norm"]["json"].get("summary", ""))
+                    j = gf["json"]
+                    st.caption("Summary (from web content):")
+                    st.write(j.get("forecast_summary", ""))
+                    st.caption("Sources:")
+                    st.write(j.get("sources", []))
                     st.dataframe(
                         [
                             {
@@ -4743,26 +5389,26 @@ if st.button("Get forecast", type="primary"):
                                 "temperature": p.get("temperature"),
                                 "wind": p.get("wind"),
                                 "shortForecast": p.get("shortForecast"),
-                                "hazards": ", ".join(p.get("hazards", []) or []),
                                 "notes": p.get("notes", ""),
                             }
-                            for p in (res["gpt_norm"]["json"].get("periods") or [])
+                            for p in (j.get("periods") or [])
                         ],
                         use_container_width=True,
                         hide_index=True,
                     )
 
-        # RIGHT: GPT web_search
+        # RIGHT: GPT(web_search) free-form
         with colC:
-            st.subheader("GPT (web_search; untrusted)")
-            if not res["gpt_web"].get("ok", False):
-                st.error(res["gpt_web"].get("reason", "GPT web error"))
+            st.subheader("GPT(web_search; free-form)")
+            gw = res["gpt_web"]
+            if not gw.get("ok", False):
+                st.error(gw.get("reason", "GPT web error"))
             else:
-                if res["gpt_web"].get("json") is None:
-                    st.warning(res["gpt_web"].get("reason", "No JSON"))
-                    st.code(res["gpt_web"].get("raw", ""), language="text")
+                if gw.get("json") is None:
+                    st.warning(gw.get("reason", "No JSON"))
+                    st.code(gw.get("raw", ""), language="text")
                 else:
-                    j = res["gpt_web"]["json"]
+                    j = gw["json"]
                     st.caption("Summary (from web content):")
                     st.write(j.get("forecast_summary", ""))
                     st.caption("Sources:")
@@ -4784,21 +5430,19 @@ if st.button("Get forecast", type="primary"):
 
         st.divider()
 
-        # ────────────────────────────────────────────────────────────────────
-        # ONE unified side-by-side comparison table aligned by NWS period names
-        # ────────────────────────────────────────────────────────────────────
-        st.subheader("Direct Comparison (Aligned by NWS period name)")
-
+        st.subheader("Direct Comparison (Join key = NWS period name)")
         if res["nws"].get("ok", False):
             nws_periods = res["nws"].get("periods") or []
-            gpt_norm_periods = []
-            if res["gpt_norm"].get("ok", False) and res["gpt_norm"].get("json"):
-                gpt_norm_periods = res["gpt_norm"]["json"].get("periods") or []
+
+            gpt_form_periods = []
+            if res["gpt_form"].get("ok", False) and res["gpt_form"].get("json"):
+                gpt_form_periods = res["gpt_form"]["json"].get("periods") or []
+
             gpt_web_periods = []
             if res["gpt_web"].get("ok", False) and res["gpt_web"].get("json"):
                 gpt_web_periods = res["gpt_web"]["json"].get("periods") or []
 
-            rows = build_side_by_side_rows(nws_periods, gpt_norm_periods, gpt_web_periods)
+            rows = build_side_by_side_rows(nws_periods, gpt_form_periods, gpt_web_periods)
             st.dataframe(rows, use_container_width=True, hide_index=True)
         else:
             st.warning("No comparison table available because the NWS API failed.")
@@ -4807,3 +5451,7 @@ if st.button("Get forecast", type="primary"):
         st.error(f"HTTP error: {e}")
     except Exception as e:
         st.error(str(e))
+
+
+
+
