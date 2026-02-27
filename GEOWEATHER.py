@@ -953,43 +953,50 @@
 
 
 
-
-
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-Streamlit app: NWS Weather (clean UI, no "periods/hours" settings)
+Streamlit app: FULL WEATHER REPORT (exactly like your CLI printout style),
+but in Streamlit.
 
 UI:
-  - One text box for location (supports: "500 miles north of Fort Collins, CO", "200 km NE of ...")
+  - One text box for location
   - One button: Get Forecast
-  - Displays:
-      1) A compact "Now / Next / Tonight / Tomorrow" block (when available)
-      2) A full DAILY table (all periods returned by NWS, typically ~14)
-      3) An HOURLY table for the next 24 hours (fixed)
-  - Optional: show raw forecast URLs (expander)
+  - Output is ONE big formatted text report (same layout as your CLI report)
+  - No "daily periods" or "hourly hours" settings
 
 Geocoding:
   - Photon primary (with User-Agent)
   - Nominatim fallback (with User-Agent)
   - NO email anywhere
 
+Relative locations:
+  - Supports miles + kilometers and diagonals + typo "miels"
+    e.g. "500 miles north of Fort Collins, CO"
+         "200 km NE of Fort Collins, CO"
+         "10 miels west of Denver, CO"
+
 Run:
-  pip install streamlit requests pandas
+  pip install streamlit requests
   streamlit run app.py
 """
 
 import re
+import time
 import math
 import requests
 import streamlit as st
-import pandas as pd
+from textwrap import shorten
 
-USER_AGENT = "WeatherStreamlitApp/3.0"
+USER_AGENT = "WeatherStreamlitApp/4.0"
 COMMON_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 NWS_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/geo+json, application/json"}
+
+# Fixed output choices (no UI settings)
+INCLUDE_HOURLY = True
+N_DAILY = 14       # show ALL daily periods typically returned (usually 14)
+N_HOURLY = 24      # show next 24 hours
 
 # ───────────────────────────────────────────────────────────────────────────────
 # HTTP
@@ -1117,96 +1124,176 @@ def resolve_location(description: str):
     return lat, lon, name
 
 # ───────────────────────────────────────────────────────────────────────────────
-# NWS
+# NWS FORECAST
 # ───────────────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=600)
 def nws_points(lat, lon):
     return _get_json(f"https://api.weather.gov/points/{lat:.6f},{lon:.6f}", headers=NWS_HEADERS)
 
 @st.cache_data(ttl=600)
-def nws_forecasts(lat, lon):
-    pts = nws_points(lat, lon)
-    props = pts.get("properties", {})
+def nws_periods(lat, lon, hourly=False):
+    points = nws_points(lat, lon)
+    props = points.get("properties", {})
+    forecast_url = props.get("forecastHourly") if hourly else props.get("forecast")
+    if not forecast_url:
+        raise RuntimeError("NWS points response missing forecast URL.")
+    fc = _get_json(forecast_url, headers=NWS_HEADERS)
+    periods = fc.get("properties", {}).get("periods", [])
+    return periods, forecast_url, props
 
-    daily_url = props.get("forecast")
-    hourly_url = props.get("forecastHourly")
-    if not daily_url or not hourly_url:
-        raise RuntimeError("NWS points response missing forecast URLs (U.S. only).")
+def first_daytime(periods):
+    for p in periods:
+        if p.get("isDaytime") is True:
+            return p
+    return periods[0] if periods else None
 
-    daily = _get_json(daily_url, headers=NWS_HEADERS).get("properties", {}).get("periods", []) or []
-    hourly = _get_json(hourly_url, headers=NWS_HEADERS).get("properties", {}).get("periods", []) or []
-    return pts, daily, hourly, daily_url, hourly_url
-
+# ───────────────────────────────────────────────────────────────────────────────
+# PRETTY REPORT (returns a big string)
+# ───────────────────────────────────────────────────────────────────────────────
 def _fmt_prob(p):
     if isinstance(p, dict):
         v = p.get("value", None)
-        return None if v is None else int(round(v))
-    return None
+        return "—" if v is None else f"{int(round(v))}%"
+    return "—" if p is None else str(p)
 
 def _fmt_humidity(p):
     rh = p.get("relativeHumidity")
     if isinstance(rh, dict):
         v = rh.get("value", None)
-        return None if v is None else int(round(v))
-    return None
+        return "—" if v is None else f"{int(round(v))}%"
+    return "—"
 
-def daily_df(periods):
-    rows = []
-    for p in periods:
-        rows.append({
-            "Period": p.get("name", "—"),
-            "Start": (p.get("startTime") or "")[:16],
-            "Temp": f"{p.get('temperature','—')}{p.get('temperatureUnit','')}",
-            "Wind": f"{p.get('windSpeed','—')} {p.get('windDirection','')}".strip(),
-            "POP%": _fmt_prob(p.get("probabilityOfPrecipitation")),
-            "RH%": _fmt_humidity(p),
-            "Summary": p.get("shortForecast", "—"),
-        })
-    return pd.DataFrame(rows)
+def _fmt_temp(p):
+    t = p.get("temperature")
+    u = p.get("temperatureUnit", "")
+    return "—" if t is None else f"{t}{u}"
 
-def hourly_df(periods, n=24):
-    rows = []
-    for p in periods[:n]:
-        start = (p.get("startTime") or "")[:16]
-        rows.append({
-            "Start": start,
-            "Temp": f"{p.get('temperature','—')}{p.get('temperatureUnit','')}",
-            "Wind": f"{p.get('windSpeed','—')} {p.get('windDirection','')}".strip(),
-            "POP%": _fmt_prob(p.get("probabilityOfPrecipitation")),
-            "RH%": _fmt_humidity(p),
-            "Summary": p.get("shortForecast", "—"),
-        })
-    return pd.DataFrame(rows)
+def _fmt_wind(p):
+    ws = p.get("windSpeed") or "—"
+    wd = p.get("windDirection") or ""
+    return (ws + (" " + wd if wd else "")).strip()
 
-def pick_period(periods, name_like):
-    nl = name_like.lower()
-    for p in periods:
-        nm = (p.get("name") or "").lower()
-        if nl in nm:
-            return p
-    return None
+def _wrap(text, width=92):
+    if not text:
+        return ""
+    words = text.split()
+    lines, cur, n = [], [], 0
+    for w in words:
+        if n + len(w) + (1 if cur else 0) > width:
+            lines.append(" ".join(cur))
+            cur = [w]
+            n = len(w)
+        else:
+            cur.append(w)
+            n += len(w) + (1 if len(cur) > 1 else 0)
+    if cur:
+        lines.append(" ".join(cur))
+    return "\n".join(lines)
 
-def period_card_md(p, title):
-    if not p:
-        return f"**{title}**\n\n—"
-    temp = f"{p.get('temperature','—')}{p.get('temperatureUnit','')}"
-    wind = f"{p.get('windSpeed','—')} {p.get('windDirection','')}".strip()
-    pop = _fmt_prob(p.get("probabilityOfPrecipitation"))
-    pop_s = "—" if pop is None else f"{pop}%"
-    summ = p.get("shortForecast", "—")
-    det = p.get("detailedForecast", "")
-    det = det if det else ""
-    return (
-        f"**{title} — {p.get('name','—')}**\n\n"
-        f"- Temp: {temp}\n"
-        f"- Wind: {wind}\n"
-        f"- POP: {pop_s}\n"
-        f"- Summary: {summ}\n"
-        + (f"\n{det}" if det else "")
-    )
+def build_full_report_text(description: str):
+    lat, lon, label = resolve_location(description)
+
+    daily_periods, daily_url, props = nws_periods(lat, lon, hourly=False)
+    if not daily_periods:
+        raise RuntimeError("No daily forecast periods returned from NWS (U.S. only).")
+
+    current = daily_periods[0]
+    today_day = first_daytime(daily_periods)
+
+    hourly_periods, hourly_url = ([], None)
+    if INCLUDE_HOURLY:
+        hourly_periods, hourly_url, _ = nws_periods(lat, lon, hourly=True)
+
+    grid_id = props.get("gridId", "—")
+    grid_x = props.get("gridX", "—")
+    grid_y = props.get("gridY", "—")
+    cwa = props.get("cwa", "—")
+    radar = props.get("radarStation", "—")
+    rel_loc = props.get("relativeLocation", {}).get("properties", {})
+    near_city = rel_loc.get("city")
+    near_state = rel_loc.get("state")
+    near_str = f"{near_city}, {near_state}" if near_city and near_state else "—"
+
+    ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+
+    out = []
+    out.append("\n" + "=" * 96)
+    out.append("FULL WEATHER REPORT (NWS api.weather.gov)")
+    out.append("=" * 96)
+    out.append(f"Input location     : {description}")
+    out.append(f"Resolved location  : {label}")
+    out.append(f"Nearest named place: {near_str}")
+    out.append(f"Coordinates        : {lat:.6f}, {lon:.6f}")
+    out.append(f"NWS grid           : {grid_id} ({grid_x},{grid_y}) | CWA {cwa} | Radar {radar}")
+    out.append(f"Generated          : {ts}")
+    out.append("-" * 96)
+
+    if today_day:
+        out.append("HIGHLIGHT (first daytime period)")
+        out.append(f"  Period   : {today_day.get('name','—')}")
+        out.append(f"  Temp     : {_fmt_temp(today_day)}")
+        out.append(f"  Wind     : {_fmt_wind(today_day)}")
+        out.append(f"  POP      : {_fmt_prob(today_day.get('probabilityOfPrecipitation'))}")
+        out.append(f"  RH       : {_fmt_humidity(today_day)}")
+        out.append(f"  Summary  : {today_day.get('shortForecast','—')}")
+        det = today_day.get("detailedForecast", "")
+        if det:
+            out.append("  Details  :")
+            out.append("    " + _wrap(det, width=88).replace("\n", "\n    "))
+        out.append("-" * 96)
+
+    daily_show = daily_periods[:N_DAILY]
+    out.append(f"DAILY FORECAST (next {min(N_DAILY, len(daily_periods))} periods)")
+    header = f"{'Period':18} {'Temp':8} {'Wind':18} {'POP':6} {'RH':6} {'Short forecast'}"
+    out.append(header)
+    out.append("-" * len(header))
+    for p in daily_show:
+        period = (p.get("name") or "—")[:18]
+        temp = _fmt_temp(p)[:8]
+        wind = _fmt_wind(p)[:18]
+        pop = _fmt_prob(p.get("probabilityOfPrecipitation")).rjust(6)
+        rh = _fmt_humidity(p).rjust(6)
+        short_fc = shorten(p.get("shortForecast") or "—", width=52, placeholder="…")
+        out.append(f"{period:18} {temp:8} {wind:18} {pop:6} {rh:6} {short_fc}")
+    out.append("-" * 96)
+    out.append(f"Daily forecast URL : {daily_url}")
+    if hourly_url:
+        out.append(f"Hourly forecast URL: {hourly_url}")
+    out.append("-" * 96)
+
+    if INCLUDE_HOURLY and hourly_periods:
+        hourly_show = hourly_periods[:N_HOURLY]
+        out.append(f"HOURLY SNAPSHOT (next {min(N_HOURLY, len(hourly_periods))} hours)")
+        header = f"{'Start':20} {'Temp':8} {'Wind':18} {'POP':6} {'RH':6} {'Short forecast'}"
+        out.append(header)
+        out.append("-" * len(header))
+        for p in hourly_show:
+            start = (p.get("startTime") or "—")[:20]
+            temp = _fmt_temp(p)[:8]
+            wind = _fmt_wind(p)[:18]
+            pop = _fmt_prob(p.get("probabilityOfPrecipitation")).rjust(6)
+            rh = _fmt_humidity(p).rjust(6)
+            short_fc = shorten(p.get("shortForecast") or "—", width=52, placeholder="…")
+            out.append(f"{start:20} {temp:8} {wind:18} {pop:6} {rh:6} {short_fc}")
+        out.append("-" * 96)
+
+    out.append("CURRENT PERIOD (daily period[0])")
+    out.append(f"  Period   : {current.get('name','—')}")
+    out.append(f"  Temp     : {_fmt_temp(current)}")
+    out.append(f"  Wind     : {_fmt_wind(current)}")
+    out.append(f"  POP      : {_fmt_prob(current.get('probabilityOfPrecipitation'))}")
+    out.append(f"  RH       : {_fmt_humidity(current)}")
+    out.append(f"  Summary  : {current.get('shortForecast','—')}")
+    det = current.get("detailedForecast", "")
+    if det:
+        out.append("  Details  :")
+        out.append("    " + _wrap(det, width=88).replace("\n", "\n    "))
+    out.append("=" * 96 + "\n")
+
+    return "\n".join(out)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# UI
+# STREAMLIT UI
 # ───────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Weather", layout="centered")
 st.title("Weather Forecast")
@@ -1216,58 +1303,9 @@ location = st.text_input("Enter location", "500 miles north of Fort Collins, CO"
 if st.button("Get Forecast", type="primary"):
     try:
         with st.spinner("Fetching forecast..."):
-            lat, lon, label = resolve_location(location)
-            pts, daily, hourly, daily_url, hourly_url = nws_forecasts(lat, lon)
-
-        props = pts.get("properties", {})
-        rel_loc = props.get("relativeLocation", {}).get("properties", {})
-        near_city = rel_loc.get("city")
-        near_state = rel_loc.get("state")
-        near_str = f"{near_city}, {near_state}" if near_city and near_state else "—"
-
-        st.success(f"Resolved: {label}  |  Nearest: {near_str}  |  {lat:.4f}, {lon:.4f}")
-
-        # “Now / Next / Tonight / Tomorrow” style summary
-        now_p = daily[0] if daily else None
-        tonight_p = pick_period(daily, "tonight")
-        tomorrow_p = pick_period(daily, "tomorrow")
-        # crude "next" = second period
-        next_p = daily[1] if len(daily) > 1 else None
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown(period_card_md(now_p, "Now"), unsafe_allow_html=False)
-        with c2:
-            st.markdown(period_card_md(next_p, "Next"), unsafe_allow_html=False)
-
-        c3, c4 = st.columns(2)
-        with c3:
-            st.markdown(period_card_md(tonight_p, "Tonight"), unsafe_allow_html=False)
-        with c4:
-            st.markdown(period_card_md(tomorrow_p, "Tomorrow"), unsafe_allow_html=False)
-
-        st.divider()
-
-        # Full daily table (all periods returned)
-        st.subheader("Daily forecast (full)")
-        if daily:
-            st.dataframe(daily_df(daily), use_container_width=True, hide_index=True)
-        else:
-            st.write("No daily periods returned.")
-
-        # Fixed next 24 hours
-        st.subheader("Hourly (next 24 hours)")
-        if hourly:
-            st.dataframe(hourly_df(hourly, n=24), use_container_width=True, hide_index=True)
-        else:
-            st.write("No hourly periods returned.")
-
-        with st.expander("Forecast URLs"):
-            st.write("Daily:", daily_url)
-            st.write("Hourly:", hourly_url)
-
+            report_text = build_full_report_text(location)
+        st.text_area("Forecast report", value=report_text, height=700)
     except Exception as e:
         st.error(str(e))
-
 
 
