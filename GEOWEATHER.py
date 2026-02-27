@@ -953,29 +953,374 @@
 
 
 
+# #!/usr/bin/env python3
+# # -*- coding: utf-8 -*-
+
+# """
+# Streamlit app: FULL WEATHER REPORT (exactly like your CLI printout style),
+# but in Streamlit.
+
+# UI:
+#   - One text box for location
+#   - One button: Get Forecast
+#   - Output is ONE big formatted text report (same layout as your CLI report)
+#   - No "daily periods" or "hourly hours" settings
+
+# Geocoding:
+#   - Photon primary (with User-Agent)
+#   - Nominatim fallback (with User-Agent)
+#   - NO email anywhere
+
+# Relative locations:
+#   - Supports miles + kilometers and diagonals + typo "miels"
+#     e.g. "500 miles north of Fort Collins, CO"
+#          "200 km NE of Fort Collins, CO"
+#          "10 miels west of Denver, CO"
+
+# Run:
+#   pip install streamlit requests
+#   streamlit run app.py
+# """
+
+# import re
+# import time
+# import math
+# import requests
+# import streamlit as st
+# from textwrap import shorten
+
+# USER_AGENT = "WeatherStreamlitApp/4.0"
+# COMMON_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+# NWS_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/geo+json, application/json"}
+
+# # Fixed output choices (no UI settings)
+# INCLUDE_HOURLY = True
+# N_DAILY = 14       # show ALL daily periods typically returned (usually 14)
+# N_HOURLY = 24      # show next 24 hours
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # HTTP
+# # ───────────────────────────────────────────────────────────────────────────────
+# def _get_json(url, params=None, headers=None, timeout=30):
+#     r = requests.get(url, params=params, headers=headers or {}, timeout=timeout)
+#     r.raise_for_status()
+#     return r.json()
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # GEOCODING (Photon primary, Nominatim fallback) — NO EMAIL
+# # ───────────────────────────────────────────────────────────────────────────────
+# def geocode_photon(query: str):
+#     url = "https://photon.komoot.io/api/"
+#     params = {"q": query, "limit": 1}
+#     data = _get_json(url, params=params, headers=COMMON_HEADERS)
+
+#     feats = data.get("features") or []
+#     if not feats:
+#         raise RuntimeError("Photon returned no results.")
+
+#     feat = feats[0]
+#     props = feat.get("properties") or {}
+#     lon, lat = feat.get("geometry", {}).get("coordinates", [None, None])
+#     if lat is None or lon is None:
+#         raise RuntimeError("Photon result missing coordinates.")
+
+#     label_parts = []
+#     for k in ("name", "city", "state", "country"):
+#         v = props.get(k)
+#         if v and v not in label_parts:
+#             label_parts.append(v)
+#     label = ", ".join(label_parts) if label_parts else query
+
+#     return float(lat), float(lon), label
+
+# def geocode_nominatim(query: str):
+#     url = "https://nominatim.openstreetmap.org/search"
+#     params = {"q": query, "format": "json", "limit": 1, "addressdetails": 0}
+#     data = _get_json(url, params=params, headers=COMMON_HEADERS)
+
+#     if not data:
+#         raise RuntimeError("Nominatim returned no results.")
+
+#     lat = float(data[0]["lat"])
+#     lon = float(data[0]["lon"])
+#     name = data[0].get("display_name", query)
+#     return lat, lon, name
+
+# @st.cache_data(ttl=3600)
+# def geocode_place(query: str):
+#     try:
+#         return geocode_photon(query)
+#     except Exception:
+#         return geocode_nominatim(query)
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # RELATIVE LOCATION PARSING + OFFSETS (miles + km, diagonals, typo "miels")
+# # ───────────────────────────────────────────────────────────────────────────────
+# REL_RE = re.compile(
+#     r"""
+#     ^\s*
+#     (?P<distance>\d+(?:\.\d+)?)\s*
+#     (?P<unit>mi|mile|miles|miels|km|kms|kilometer|kilometers)\s*
+#     (?P<dir>north|south|east|west|n|s|e|w|ne|nw|se|sw|
+#             northeast|northwest|southeast|southwest)\s*
+#     of\s*
+#     (?P<place>.+?)\s*
+#     $
+#     """,
+#     re.IGNORECASE | re.VERBOSE,
+# )
+
+# def _dir_to_bearing(dir_str: str) -> float:
+#     d = dir_str.strip().lower()
+#     mapping = {
+#         "n": 0.0, "north": 0.0,
+#         "ne": 45.0, "northeast": 45.0,
+#         "e": 90.0, "east": 90.0,
+#         "se": 135.0, "southeast": 135.0,
+#         "s": 180.0, "south": 180.0,
+#         "sw": 225.0, "southwest": 225.0,
+#         "w": 270.0, "west": 270.0,
+#         "nw": 315.0, "northwest": 315.0,
+#     }
+#     if d not in mapping:
+#         raise ValueError(f"Unsupported direction: {dir_str}")
+#     return mapping[d]
+
+# def _to_miles(distance: float, unit: str) -> float:
+#     u = unit.strip().lower()
+#     if u in ("km", "kms", "kilometer", "kilometers"):
+#         return distance * 0.621371
+#     return distance
+
+# def offset_latlon_bearing(lat: float, lon: float, miles: float, bearing_deg: float):
+#     miles_per_deg_lat = 69.0
+#     dlat = (miles / miles_per_deg_lat) * math.cos(math.radians(bearing_deg))
+
+#     miles_per_deg_lon = 69.0 * max(0.01, abs(math.cos(math.radians(lat))))
+#     dlon = (miles / miles_per_deg_lon) * math.sin(math.radians(bearing_deg))
+
+#     return lat + dlat, lon + dlon
+
+# def resolve_location(description: str):
+#     s = (description or "").strip()
+#     if not s:
+#         raise ValueError("Location is empty.")
+
+#     m = REL_RE.match(s)
+#     if m:
+#         distance = float(m.group("distance"))
+#         unit = m.group("unit")
+#         direction = m.group("dir")
+#         place = m.group("place").strip()
+
+#         base_lat, base_lon, base_name = geocode_place(place)
+#         miles = _to_miles(distance, unit)
+#         bearing = _dir_to_bearing(direction)
+#         lat, lon = offset_latlon_bearing(base_lat, base_lon, miles, bearing)
+#         label = f"{distance:g} {unit} {direction.lower()} of {base_name}"
+#         return lat, lon, label
+
+#     lat, lon, name = geocode_place(s)
+#     return lat, lon, name
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # NWS FORECAST
+# # ───────────────────────────────────────────────────────────────────────────────
+# @st.cache_data(ttl=600)
+# def nws_points(lat, lon):
+#     return _get_json(f"https://api.weather.gov/points/{lat:.6f},{lon:.6f}", headers=NWS_HEADERS)
+
+# @st.cache_data(ttl=600)
+# def nws_periods(lat, lon, hourly=False):
+#     points = nws_points(lat, lon)
+#     props = points.get("properties", {})
+#     forecast_url = props.get("forecastHourly") if hourly else props.get("forecast")
+#     if not forecast_url:
+#         raise RuntimeError("NWS points response missing forecast URL.")
+#     fc = _get_json(forecast_url, headers=NWS_HEADERS)
+#     periods = fc.get("properties", {}).get("periods", [])
+#     return periods, forecast_url, props
+
+# def first_daytime(periods):
+#     for p in periods:
+#         if p.get("isDaytime") is True:
+#             return p
+#     return periods[0] if periods else None
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # PRETTY REPORT (returns a big string)
+# # ───────────────────────────────────────────────────────────────────────────────
+# def _fmt_prob(p):
+#     if isinstance(p, dict):
+#         v = p.get("value", None)
+#         return "—" if v is None else f"{int(round(v))}%"
+#     return "—" if p is None else str(p)
+
+# def _fmt_humidity(p):
+#     rh = p.get("relativeHumidity")
+#     if isinstance(rh, dict):
+#         v = rh.get("value", None)
+#         return "—" if v is None else f"{int(round(v))}%"
+#     return "—"
+
+# def _fmt_temp(p):
+#     t = p.get("temperature")
+#     u = p.get("temperatureUnit", "")
+#     return "—" if t is None else f"{t}{u}"
+
+# def _fmt_wind(p):
+#     ws = p.get("windSpeed") or "—"
+#     wd = p.get("windDirection") or ""
+#     return (ws + (" " + wd if wd else "")).strip()
+
+# def _wrap(text, width=92):
+#     if not text:
+#         return ""
+#     words = text.split()
+#     lines, cur, n = [], [], 0
+#     for w in words:
+#         if n + len(w) + (1 if cur else 0) > width:
+#             lines.append(" ".join(cur))
+#             cur = [w]
+#             n = len(w)
+#         else:
+#             cur.append(w)
+#             n += len(w) + (1 if len(cur) > 1 else 0)
+#     if cur:
+#         lines.append(" ".join(cur))
+#     return "\n".join(lines)
+
+# def build_full_report_text(description: str):
+#     lat, lon, label = resolve_location(description)
+
+#     daily_periods, daily_url, props = nws_periods(lat, lon, hourly=False)
+#     if not daily_periods:
+#         raise RuntimeError("No daily forecast periods returned from NWS (U.S. only).")
+
+#     current = daily_periods[0]
+#     today_day = first_daytime(daily_periods)
+
+#     hourly_periods, hourly_url = ([], None)
+#     if INCLUDE_HOURLY:
+#         hourly_periods, hourly_url, _ = nws_periods(lat, lon, hourly=True)
+
+#     grid_id = props.get("gridId", "—")
+#     grid_x = props.get("gridX", "—")
+#     grid_y = props.get("gridY", "—")
+#     cwa = props.get("cwa", "—")
+#     radar = props.get("radarStation", "—")
+#     rel_loc = props.get("relativeLocation", {}).get("properties", {})
+#     near_city = rel_loc.get("city")
+#     near_state = rel_loc.get("state")
+#     near_str = f"{near_city}, {near_state}" if near_city and near_state else "—"
+
+#     ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+
+#     out = []
+#     out.append("\n" + "=" * 96)
+#     out.append("FULL WEATHER REPORT (NWS api.weather.gov)")
+#     out.append("=" * 96)
+#     out.append(f"Input location     : {description}")
+#     out.append(f"Resolved location  : {label}")
+#     out.append(f"Nearest named place: {near_str}")
+#     out.append(f"Coordinates        : {lat:.6f}, {lon:.6f}")
+#     out.append(f"NWS grid           : {grid_id} ({grid_x},{grid_y}) | CWA {cwa} | Radar {radar}")
+#     out.append(f"Generated          : {ts}")
+#     out.append("-" * 96)
+
+#     if today_day:
+#         out.append("HIGHLIGHT (first daytime period)")
+#         out.append(f"  Period   : {today_day.get('name','—')}")
+#         out.append(f"  Temp     : {_fmt_temp(today_day)}")
+#         out.append(f"  Wind     : {_fmt_wind(today_day)}")
+#         out.append(f"  POP      : {_fmt_prob(today_day.get('probabilityOfPrecipitation'))}")
+#         out.append(f"  RH       : {_fmt_humidity(today_day)}")
+#         out.append(f"  Summary  : {today_day.get('shortForecast','—')}")
+#         det = today_day.get("detailedForecast", "")
+#         if det:
+#             out.append("  Details  :")
+#             out.append("    " + _wrap(det, width=88).replace("\n", "\n    "))
+#         out.append("-" * 96)
+
+#     daily_show = daily_periods[:N_DAILY]
+#     out.append(f"DAILY FORECAST (next {min(N_DAILY, len(daily_periods))} periods)")
+#     header = f"{'Period':18} {'Temp':8} {'Wind':18} {'POP':6} {'RH':6} {'Short forecast'}"
+#     out.append(header)
+#     out.append("-" * len(header))
+#     for p in daily_show:
+#         period = (p.get("name") or "—")[:18]
+#         temp = _fmt_temp(p)[:8]
+#         wind = _fmt_wind(p)[:18]
+#         pop = _fmt_prob(p.get("probabilityOfPrecipitation")).rjust(6)
+#         rh = _fmt_humidity(p).rjust(6)
+#         short_fc = shorten(p.get("shortForecast") or "—", width=52, placeholder="…")
+#         out.append(f"{period:18} {temp:8} {wind:18} {pop:6} {rh:6} {short_fc}")
+#     out.append("-" * 96)
+#     out.append(f"Daily forecast URL : {daily_url}")
+#     if hourly_url:
+#         out.append(f"Hourly forecast URL: {hourly_url}")
+#     out.append("-" * 96)
+
+#     if INCLUDE_HOURLY and hourly_periods:
+#         hourly_show = hourly_periods[:N_HOURLY]
+#         out.append(f"HOURLY SNAPSHOT (next {min(N_HOURLY, len(hourly_periods))} hours)")
+#         header = f"{'Start':20} {'Temp':8} {'Wind':18} {'POP':6} {'RH':6} {'Short forecast'}"
+#         out.append(header)
+#         out.append("-" * len(header))
+#         for p in hourly_show:
+#             start = (p.get("startTime") or "—")[:20]
+#             temp = _fmt_temp(p)[:8]
+#             wind = _fmt_wind(p)[:18]
+#             pop = _fmt_prob(p.get("probabilityOfPrecipitation")).rjust(6)
+#             rh = _fmt_humidity(p).rjust(6)
+#             short_fc = shorten(p.get("shortForecast") or "—", width=52, placeholder="…")
+#             out.append(f"{start:20} {temp:8} {wind:18} {pop:6} {rh:6} {short_fc}")
+#         out.append("-" * 96)
+
+#     out.append("CURRENT PERIOD (daily period[0])")
+#     out.append(f"  Period   : {current.get('name','—')}")
+#     out.append(f"  Temp     : {_fmt_temp(current)}")
+#     out.append(f"  Wind     : {_fmt_wind(current)}")
+#     out.append(f"  POP      : {_fmt_prob(current.get('probabilityOfPrecipitation'))}")
+#     out.append(f"  RH       : {_fmt_humidity(current)}")
+#     out.append(f"  Summary  : {current.get('shortForecast','—')}")
+#     det = current.get("detailedForecast", "")
+#     if det:
+#         out.append("  Details  :")
+#         out.append("    " + _wrap(det, width=88).replace("\n", "\n    "))
+#     out.append("=" * 96 + "\n")
+
+#     return "\n".join(out)
+
+# # ───────────────────────────────────────────────────────────────────────────────
+# # STREAMLIT UI
+# # ───────────────────────────────────────────────────────────────────────────────
+# st.set_page_config(page_title="Weather", layout="centered")
+# st.title("Weather Forecast")
+
+# location = st.text_input("Enter location", "500 miles north of Fort Collins, CO")
+
+# if st.button("Get Forecast", type="primary"):
+#     try:
+#         with st.spinner("Fetching forecast..."):
+#             report_text = build_full_report_text(location)
+#         st.text_area("Forecast report", value=report_text, height=700)
+#     except Exception as e:
+#         st.error(str(e))
+
+
+
+
+
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
-Streamlit app: FULL WEATHER REPORT (exactly like your CLI printout style),
-but in Streamlit.
+Streamlit app: FULL WEATHER REPORT (CLI-style big text report) + Geolocation.
 
-UI:
-  - One text box for location
-  - One button: Get Forecast
-  - Output is ONE big formatted text report (same layout as your CLI report)
-  - No "daily periods" or "hourly hours" settings
-
-Geocoding:
-  - Photon primary (with User-Agent)
-  - Nominatim fallback (with User-Agent)
-  - NO email anywhere
-
-Relative locations:
-  - Supports miles + kilometers and diagonals + typo "miels"
-    e.g. "500 miles north of Fort Collins, CO"
-         "200 km NE of Fort Collins, CO"
-         "10 miels west of Denver, CO"
+This version uses the NWS API forecast logic from your first script (nws_forecast),
+and keeps the Streamlit app structure + geocoding/relative-location parsing from your second script.
 
 Run:
   pip install streamlit requests
@@ -989,14 +1334,17 @@ import requests
 import streamlit as st
 from textwrap import shorten
 
-USER_AGENT = "WeatherStreamlitApp/4.0"
+# ───────────────────────────────────────────────────────────────────────────────
+# HEADERS
+# ───────────────────────────────────────────────────────────────────────────────
+USER_AGENT = "RCVFD-WeatherStreamlit/1.0"
 COMMON_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 NWS_HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/geo+json, application/json"}
 
 # Fixed output choices (no UI settings)
 INCLUDE_HOURLY = True
-N_DAILY = 14       # show ALL daily periods typically returned (usually 14)
-N_HOURLY = 24      # show next 24 hours
+N_DAILY = 14
+N_HOURLY = 24
 
 # ───────────────────────────────────────────────────────────────────────────────
 # HTTP
@@ -1124,22 +1472,37 @@ def resolve_location(description: str):
     return lat, lon, name
 
 # ───────────────────────────────────────────────────────────────────────────────
-# NWS FORECAST
+# NWS FORECAST (from your first script logic)
 # ───────────────────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=600)
-def nws_points(lat, lon):
-    return _get_json(f"https://api.weather.gov/points/{lat:.6f},{lon:.6f}", headers=NWS_HEADERS)
+def _req_json(url, headers=None, timeout=30):
+    r = requests.get(url, headers=headers or {}, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
 
 @st.cache_data(ttl=600)
-def nws_periods(lat, lon, hourly=False):
-    points = nws_points(lat, lon)
+def nws_forecast(lat, lon, hourly=False):
+    """
+    Returns a dict with NWS forecast periods.
+    """
+    points_url = f"https://api.weather.gov/points/{lat:.6f},{lon:.6f}"
+    points = _req_json(points_url, headers=NWS_HEADERS)
     props = points.get("properties", {})
     forecast_url = props.get("forecastHourly") if hourly else props.get("forecast")
     if not forecast_url:
         raise RuntimeError("NWS points response missing forecast URL.")
-    fc = _get_json(forecast_url, headers=NWS_HEADERS)
+
+    fc = _req_json(forecast_url, headers=NWS_HEADERS)
     periods = fc.get("properties", {}).get("periods", [])
-    return periods, forecast_url, props
+    return {
+        "source": "NWS api.weather.gov",
+        "lat": lat,
+        "lon": lon,
+        "hourly": bool(hourly),
+        "forecast_url": forecast_url,
+        "periods": periods,
+        "points_properties": props,
+        "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
 
 def first_daytime(periods):
     for p in periods:
@@ -1155,13 +1518,6 @@ def _fmt_prob(p):
         v = p.get("value", None)
         return "—" if v is None else f"{int(round(v))}%"
     return "—" if p is None else str(p)
-
-def _fmt_humidity(p):
-    rh = p.get("relativeHumidity")
-    if isinstance(rh, dict):
-        v = rh.get("value", None)
-        return "—" if v is None else f"{int(round(v))}%"
-    return "—"
 
 def _fmt_temp(p):
     t = p.get("temperature")
@@ -1193,16 +1549,22 @@ def _wrap(text, width=92):
 def build_full_report_text(description: str):
     lat, lon, label = resolve_location(description)
 
-    daily_periods, daily_url, props = nws_periods(lat, lon, hourly=False)
+    daily = nws_forecast(lat, lon, hourly=False)
+    daily_periods = daily.get("periods") or []
     if not daily_periods:
         raise RuntimeError("No daily forecast periods returned from NWS (U.S. only).")
+
+    props = daily.get("points_properties") or {}
+    daily_url = daily.get("forecast_url")
 
     current = daily_periods[0]
     today_day = first_daytime(daily_periods)
 
     hourly_periods, hourly_url = ([], None)
     if INCLUDE_HOURLY:
-        hourly_periods, hourly_url, _ = nws_periods(lat, lon, hourly=True)
+        hourly = nws_forecast(lat, lon, hourly=True)
+        hourly_periods = hourly.get("periods") or []
+        hourly_url = hourly.get("forecast_url")
 
     grid_id = props.get("gridId", "—")
     grid_x = props.get("gridX", "—")
@@ -1234,7 +1596,6 @@ def build_full_report_text(description: str):
         out.append(f"  Temp     : {_fmt_temp(today_day)}")
         out.append(f"  Wind     : {_fmt_wind(today_day)}")
         out.append(f"  POP      : {_fmt_prob(today_day.get('probabilityOfPrecipitation'))}")
-        out.append(f"  RH       : {_fmt_humidity(today_day)}")
         out.append(f"  Summary  : {today_day.get('shortForecast','—')}")
         det = today_day.get("detailedForecast", "")
         if det:
@@ -1244,7 +1605,7 @@ def build_full_report_text(description: str):
 
     daily_show = daily_periods[:N_DAILY]
     out.append(f"DAILY FORECAST (next {min(N_DAILY, len(daily_periods))} periods)")
-    header = f"{'Period':18} {'Temp':8} {'Wind':18} {'POP':6} {'RH':6} {'Short forecast'}"
+    header = f"{'Period':18} {'Temp':8} {'Wind':18} {'POP':6} {'Short forecast'}"
     out.append(header)
     out.append("-" * len(header))
     for p in daily_show:
@@ -1252,9 +1613,8 @@ def build_full_report_text(description: str):
         temp = _fmt_temp(p)[:8]
         wind = _fmt_wind(p)[:18]
         pop = _fmt_prob(p.get("probabilityOfPrecipitation")).rjust(6)
-        rh = _fmt_humidity(p).rjust(6)
-        short_fc = shorten(p.get("shortForecast") or "—", width=52, placeholder="…")
-        out.append(f"{period:18} {temp:8} {wind:18} {pop:6} {rh:6} {short_fc}")
+        short_fc = shorten(p.get("shortForecast") or "—", width=62, placeholder="…")
+        out.append(f"{period:18} {temp:8} {wind:18} {pop:6} {short_fc}")
     out.append("-" * 96)
     out.append(f"Daily forecast URL : {daily_url}")
     if hourly_url:
@@ -1264,7 +1624,7 @@ def build_full_report_text(description: str):
     if INCLUDE_HOURLY and hourly_periods:
         hourly_show = hourly_periods[:N_HOURLY]
         out.append(f"HOURLY SNAPSHOT (next {min(N_HOURLY, len(hourly_periods))} hours)")
-        header = f"{'Start':20} {'Temp':8} {'Wind':18} {'POP':6} {'RH':6} {'Short forecast'}"
+        header = f"{'Start':20} {'Temp':8} {'Wind':18} {'POP':6} {'Short forecast'}"
         out.append(header)
         out.append("-" * len(header))
         for p in hourly_show:
@@ -1272,9 +1632,8 @@ def build_full_report_text(description: str):
             temp = _fmt_temp(p)[:8]
             wind = _fmt_wind(p)[:18]
             pop = _fmt_prob(p.get("probabilityOfPrecipitation")).rjust(6)
-            rh = _fmt_humidity(p).rjust(6)
-            short_fc = shorten(p.get("shortForecast") or "—", width=52, placeholder="…")
-            out.append(f"{start:20} {temp:8} {wind:18} {pop:6} {rh:6} {short_fc}")
+            short_fc = shorten(p.get("shortForecast") or "—", width=62, placeholder="…")
+            out.append(f"{start:20} {temp:8} {wind:18} {pop:6} {short_fc}")
         out.append("-" * 96)
 
     out.append("CURRENT PERIOD (daily period[0])")
@@ -1282,7 +1641,6 @@ def build_full_report_text(description: str):
     out.append(f"  Temp     : {_fmt_temp(current)}")
     out.append(f"  Wind     : {_fmt_wind(current)}")
     out.append(f"  POP      : {_fmt_prob(current.get('probabilityOfPrecipitation'))}")
-    out.append(f"  RH       : {_fmt_humidity(current)}")
     out.append(f"  Summary  : {current.get('shortForecast','—')}")
     det = current.get("detailedForecast", "")
     if det:
