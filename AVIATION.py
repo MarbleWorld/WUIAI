@@ -1256,7 +1256,7 @@ import streamlit as st
 
 
 st.set_page_config(
-    page_title="OpenSky USFS/CALFIRE Live Snapshot",
+    page_title="LLM-Powered Wildfire Aviation",
     layout="wide",
 )
 st.markdown("""
@@ -1296,7 +1296,7 @@ except Exception:
 # If you use this, it MUST be the first Streamlit call in the file.
 # st.set_page_config(page_title="OpenSky USFS/CALFIRE Live Snapshot", layout="wide")
 
-st.title("OpenSky USFS/CALFIRE Live Snapshot")
+st.title("LLM-Powered Wildfire Aviation")
 st.caption("Current aircraft locations (not historical tracks)")
 st.divider()
 
@@ -1358,16 +1358,16 @@ st.markdown(
 
 st.markdown(
     '<div class="app-subtitle">'
-    'Pulls current OpenSky “states” in a Western US bounding box, matches to your USFS/CALFIRE masterlist, '
-    'then answers questions about <b>this live snapshot</b> (optional OpenAI).'
+    #'Pulls current OpenSky “states” in a Western US bounding box, matches to your USFS/CALFIRE masterlist, '
+   # 'then answers questions about <b>this live snapshot</b> (optional OpenAI).'
     '</div>',
     unsafe_allow_html=True,
 )
 
 # ONE question widget (keep this as text_area so it matches your screenshot)
 question = st.text_area(
-    "Ask a question about the CURRENT aircraft snapshot:",
-    value="How many helicopters are in the air and what agencies are they from?",
+    "Ask a question about the CURRENT wildland aircraft snapshot:",
+    value="",
     height=110,
 )
 
