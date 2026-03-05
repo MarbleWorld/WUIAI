@@ -1539,7 +1539,7 @@ def to_gdf_webmercator(df: pd.DataFrame) -> "gpd.GeoDataFrame":
 
 
 def plot_snapshot_basemap(df: pd.DataFrame, title: str, bbox=None):
-    fig, ax = plt.subplots(figsize=(12.5, 8.0))
+    fig, ax = plt.subplots(figsize=(8, 5.0))
     ax.set_facecolor("white")
 
     if bbox is not None:
@@ -1796,7 +1796,7 @@ if go:
         st.markdown("**Map**")
         title = f"OpenSky CURRENT states | WESTERN US bbox | matched={len(matched)}"
         fig = plot_snapshot_basemap(matched, title=title, bbox=bbox)
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, use_container_width=False)
 
         snapshot_summary = summarize_snapshot(matched)
         map_url = fig_to_data_url(fig)
