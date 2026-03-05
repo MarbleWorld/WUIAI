@@ -1254,9 +1254,8 @@ import matplotlib.pyplot as plt
 
 import streamlit as st
 
-
 st.set_page_config(
-    page_title="LLM-Powered Wildfire Aviation",
+    page_title="LLM-Powered Wildfire Aviation Dashboard",
     layout="wide",
 )
 st.markdown("""
@@ -1296,7 +1295,7 @@ except Exception:
 # If you use this, it MUST be the first Streamlit call in the file.
 # st.set_page_config(page_title="OpenSky USFS/CALFIRE Live Snapshot", layout="wide")
 
-st.title("LLM-Powered Wildfire Aviation")
+st.title("LLM-Powered Wildfire Aviation Dashboard")
 st.caption("Current aircraft locations (not historical tracks)")
 st.divider()
 
