@@ -2,25 +2,25 @@ import sqlite3
 import uuid
 from datetime import datetime
 
-import pandas as pd
 import streamlit as st
-
 
 DB_PATH = "doodle_clone.db"
 
 
+@st.cache_resource
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
 
+@st.cache_resource
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute(
-        """
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS polls (
             poll_id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
@@ -28,11 +28,9 @@ def init_db():
             creator_name TEXT,
             created_at TEXT NOT NULL
         )
-        """
-    )
+    """)
 
-    cur.execute(
-        """
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS options (
             option_id TEXT PRIMARY KEY,
             poll_id TEXT NOT NULL,
@@ -40,11 +38,9 @@ def init_db():
             option_order INTEGER NOT NULL,
             FOREIGN KEY (poll_id) REFERENCES polls(poll_id) ON DELETE CASCADE
         )
-        """
-    )
+    """)
 
-    cur.execute(
-        """
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS votes (
             vote_id TEXT PRIMARY KEY,
             poll_id TEXT NOT NULL,
@@ -56,17 +52,14 @@ def init_db():
             FOREIGN KEY (poll_id) REFERENCES polls(poll_id) ON DELETE CASCADE,
             FOREIGN KEY (option_id) REFERENCES options(option_id) ON DELETE CASCADE
         )
-        """
-    )
+    """)
 
     conn.commit()
-    conn.close()
 
 
 def create_poll(title, description, creator_name, options):
     poll_id = uuid.uuid4().hex[:10]
     created_at = datetime.utcnow().isoformat()
-
     conn = get_conn()
     cur = conn.cursor()
 
@@ -88,72 +81,53 @@ def create_poll(title, description, creator_name, options):
         )
 
     conn.commit()
-    conn.close()
     return poll_id
 
 
 def get_all_polls():
     conn = get_conn()
-    query = """
+    cur = conn.cursor()
+    cur.execute("""
         SELECT poll_id, title, description, creator_name, created_at
         FROM polls
         ORDER BY created_at DESC
-    """
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    return df
+    """)
+    return [dict(row) for row in cur.fetchall()]
 
 
 def get_poll(poll_id):
     conn = get_conn()
     cur = conn.cursor()
-
-    cur.execute(
-        """
+    cur.execute("""
         SELECT poll_id, title, description, creator_name, created_at
         FROM polls
         WHERE poll_id = ?
-        """,
-        (poll_id,),
-    )
+    """, (poll_id,))
     row = cur.fetchone()
-    conn.close()
-
-    if not row:
-        return None
-
-    return {
-        "poll_id": row[0],
-        "title": row[1],
-        "description": row[2],
-        "creator_name": row[3],
-        "created_at": row[4],
-    }
+    return dict(row) if row else None
 
 
 def get_poll_options(poll_id):
     conn = get_conn()
-    query = """
+    cur = conn.cursor()
+    cur.execute("""
         SELECT option_id, poll_id, option_label, option_order
         FROM options
         WHERE poll_id = ?
         ORDER BY option_order ASC
-    """
-    df = pd.read_sql_query(query, conn, params=(poll_id,))
-    conn.close()
-    return df
+    """, (poll_id,))
+    return [dict(row) for row in cur.fetchall()]
 
 
 def get_poll_votes(poll_id):
     conn = get_conn()
-    query = """
+    cur = conn.cursor()
+    cur.execute("""
         SELECT vote_id, poll_id, voter_name, option_id, availability, updated_at
         FROM votes
         WHERE poll_id = ?
-    """
-    df = pd.read_sql_query(query, conn, params=(poll_id,))
-    conn.close()
-    return df
+    """, (poll_id,))
+    return [dict(row) for row in cur.fetchall()]
 
 
 def save_votes(poll_id, voter_name, selections):
@@ -179,50 +153,56 @@ def save_votes(poll_id, voter_name, selections):
         )
 
     conn.commit()
-    conn.close()
 
 
 def build_results_matrix(poll_id):
-    options_df = get_poll_options(poll_id)
-    votes_df = get_poll_votes(poll_id)
+    options = get_poll_options(poll_id)
+    votes = get_poll_votes(poll_id)
 
-    if options_df.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    if not options:
+        return [], [], []
 
-    if votes_df.empty:
-        summary_df = options_df[["option_label"]].copy()
-        summary_df["yes"] = 0
-        summary_df["maybe"] = 0
-        summary_df["no"] = 0
-        summary_df["score"] = 0
-        return summary_df, pd.DataFrame(), options_df
+    option_lookup = {o["option_id"]: o["option_label"] for o in options}
+    summary = {
+        o["option_label"]: {"option_label": o["option_label"], "yes": 0, "maybe": 0, "no": 0, "score": 0}
+        for o in options
+    }
 
-    merged = votes_df.merge(options_df, on="option_id", how="left")
+    voter_matrix = {}
 
-    summary = (
-        merged.groupby("option_label")["availability"]
-        .value_counts()
-        .unstack(fill_value=0)
-        .reset_index()
+    for vote in votes:
+        option_label = option_lookup.get(vote["option_id"])
+        if not option_label:
+            continue
+
+        avail = vote["availability"]
+        voter = vote["voter_name"]
+
+        if avail in ("yes", "maybe", "no"):
+            summary[option_label][avail] += 1
+
+        if voter not in voter_matrix:
+            voter_matrix[voter] = {}
+        voter_matrix[voter][option_label] = avail
+
+    for option_label in summary:
+        summary[option_label]["score"] = summary[option_label]["yes"] * 2 + summary[option_label]["maybe"]
+
+    summary_rows = sorted(
+        summary.values(),
+        key=lambda x: (x["score"], x["yes"], x["maybe"]),
+        reverse=True,
     )
 
-    for col in ["yes", "maybe", "no"]:
-        if col not in summary.columns:
-            summary[col] = 0
+    ordered_option_labels = [o["option_label"] for o in options]
+    voter_rows = []
+    for voter_name in sorted(voter_matrix.keys()):
+        row = {"voter_name": voter_name}
+        for label in ordered_option_labels:
+            row[label] = voter_matrix[voter_name].get(label, "")
+        voter_rows.append(row)
 
-    summary["score"] = summary["yes"] * 2 + summary["maybe"] * 1
-    summary = summary[["option_label", "yes", "maybe", "no", "score"]].sort_values(
-        by=["score", "yes", "maybe"], ascending=False
-    )
-
-    voter_matrix = merged.pivot_table(
-        index="voter_name",
-        columns="option_label",
-        values="availability",
-        aggfunc="first",
-    )
-
-    return summary, voter_matrix, options_df
+    return summary_rows, voter_rows, options
 
 
 def get_poll_url_hint(poll_id):
@@ -241,13 +221,13 @@ def main():
 
     with st.sidebar:
         st.header("Navigation")
-        page = st.radio("Go to", ["Create Poll", "Open Poll", "Browse Polls"], index=0)
+        pages = ["Create Poll", "Open Poll", "Browse Polls"]
+        default_index = 1 if poll_id_from_url else 0
+        page = st.radio("Go to", pages, index=default_index)
 
         if poll_id_from_url:
             st.info(f"Poll ID from URL: {poll_id_from_url}")
-            if st.button("Open URL Poll"):
-                page = "Open Poll"
-                st.session_state["poll_id_input"] = poll_id_from_url
+            st.session_state["poll_id_input"] = poll_id_from_url
 
     if page == "Create Poll":
         st.subheader("Create a new poll")
@@ -282,7 +262,6 @@ def main():
                 st.code(new_poll_id)
                 st.write("Share this URL pattern with the poll ID appended:")
                 st.code(get_poll_url_hint(new_poll_id))
-                st.write("Or open it directly from the Open Poll page.")
 
     elif page == "Open Poll":
         st.subheader("Open and vote on a poll")
@@ -305,22 +284,20 @@ def main():
             meta_cols[1].write(f"**Creator:** {poll['creator_name'] or 'Unknown'}")
             meta_cols[2].write(f"**Created:** {poll['created_at'][:19].replace('T', ' ')}")
 
-            options_df = get_poll_options(poll_id)
-            votes_df = get_poll_votes(poll_id)
+            options = get_poll_options(poll_id)
+            votes = get_poll_votes(poll_id)
 
             st.divider()
             st.markdown("### Submit or update your availability")
 
-            existing_names = []
-            if not votes_df.empty:
-                existing_names = sorted(votes_df["voter_name"].dropna().unique().tolist())
+            existing_names = sorted({v["voter_name"] for v in votes if v["voter_name"]})
 
             with st.form("vote_form"):
                 voter_name = st.text_input("Your name", placeholder="Your name")
                 st.caption("Choose Yes, Maybe, or No for each option.")
 
                 selections = {}
-                for _, row in options_df.iterrows():
+                for row in options:
                     option_id = row["option_id"]
                     option_label = row["option_label"]
                     selections[option_id] = st.radio(
@@ -344,21 +321,20 @@ def main():
             st.divider()
             st.markdown("### Results")
 
-            summary_df, voter_matrix, _ = build_results_matrix(poll_id)
+            summary_rows, voter_rows, _ = build_results_matrix(poll_id)
 
-            if not summary_df.empty:
+            if summary_rows:
                 st.markdown("#### Option summary")
-                st.dataframe(summary_df, use_container_width=True)
+                st.dataframe(summary_rows, use_container_width=True)
 
-                best_score = summary_df["score"].max()
-                best_options = summary_df.loc[summary_df["score"] == best_score, "option_label"].tolist()
+                best_score = max(row["score"] for row in summary_rows)
+                best_options = [row["option_label"] for row in summary_rows if row["score"] == best_score]
                 if best_options:
                     st.success("Best option(s): " + " | ".join(best_options))
 
-            if not voter_matrix.empty:
+            if voter_rows:
                 st.markdown("#### Voter matrix")
-                display_matrix = voter_matrix.fillna("")
-                st.dataframe(display_matrix, use_container_width=True)
+                st.dataframe(voter_rows, use_container_width=True)
 
             if existing_names:
                 st.markdown("#### Current voters")
@@ -366,18 +342,16 @@ def main():
 
     elif page == "Browse Polls":
         st.subheader("All polls")
-        polls_df = get_all_polls()
+        polls = get_all_polls()
 
-        if polls_df.empty:
+        if not polls:
             st.info("No polls found yet.")
         else:
-            st.dataframe(polls_df, use_container_width=True)
+            st.dataframe(polls, use_container_width=True)
 
             st.markdown("### Open a poll")
-            selected_poll_id = st.selectbox(
-                "Choose poll ID",
-                options=polls_df["poll_id"].tolist(),
-            )
+            poll_ids = [p["poll_id"] for p in polls]
+            selected_poll_id = st.selectbox("Choose poll ID", options=poll_ids)
 
             if selected_poll_id:
                 poll = get_poll(selected_poll_id)
