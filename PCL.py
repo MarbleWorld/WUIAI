@@ -393,14 +393,24 @@ def download_tif_from_url(url):
     return tmp_path
 
 
-OPENAI_API_KEY = st.secrets.get("openai", {}).get("api_key") or os.getenv("OPENAI_API_KEY")
-
 def get_openai_client():
-    api_key = str(OPENAI_API_KEY or "").strip()
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set.")
-    return OpenAI(api_key=api_key)
+    api_key = ""
 
+    try:
+        if "openai" in st.secrets and "api_key" in st.secrets["openai"]:
+            api_key = str(st.secrets["openai"]["api_key"]).strip()
+    except Exception:
+        pass
+
+    if not api_key:
+        api_key = str(os.getenv("OPENAI_API_KEY", "")).strip()
+
+    if not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. Streamlit did not find [openai].api_key in secrets and did not find OPENAI_API_KEY in the environment."
+        )
+
+    return OpenAI(api_key=api_key)
 def call_gpt_for_pcl_decision(
     prompt_text: str,
     map_patch_png_bytes: bytes,
