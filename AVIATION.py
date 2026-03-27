@@ -1722,7 +1722,46 @@ def ask_snapshot_question(snapshot_summary: dict, question: str, map_data_url: s
     cost = estimate_openai_cost_usd(OPENAI_MODEL, usage)
 
     return resp.choices[0].message.content.strip(), cost
+def get_access_token(client_id: str, client_secret: str, timeout=(15, 60), max_retries=3) -> str:
+    last_err = None
 
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = requests.post(
+                TOKEN_URL,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                },
+                headers={"User-Agent": UA},
+                timeout=timeout,
+            )
+            r.raise_for_status()
+
+            payload = r.json()
+            access_token = payload.get("access_token", "").strip()
+            if not access_token:
+                raise RuntimeError(f"OpenSky token response missing access_token. Response keys: {list(payload.keys())}")
+
+            return access_token
+
+        except requests.exceptions.ConnectTimeout as e:
+            last_err = e
+            time.sleep(2 * attempt)
+
+        except requests.exceptions.ReadTimeout as e:
+            last_err = e
+            time.sleep(2 * attempt)
+
+        except requests.exceptions.RequestException as e:
+            try:
+                detail = e.response.text[:500]
+            except Exception:
+                detail = str(e)
+            raise RuntimeError(f"OpenSky token request failed: {detail}") from e
+
+    raise RuntimeError(f"OpenSky token request timed out after {max_retries} attempts: {last_err}")
 
 # =========================
 # RUN
