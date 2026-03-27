@@ -2747,7 +2747,7 @@ from pyproj import Transformer
 # Put your RAW GitHub file URL here.
 # Example:
 # https://raw.githubusercontent.com/yourusername/yourrepo/main/data/your_pcl_file.tif
-DEFAULT_TIF_URL = "https://github.com/MarbleWorld/WUIAI/blob/main/PCL_RCVFD.tif"
+DEFAULT_TIF_URL = "https://raw.githubusercontent.com/MarbleWorld/WUIAI/main/PCL_RCVFD.tif"
 
 # If your file is large, GitHub Releases or another cloud host is often better than raw GitHub.
 REQUEST_TIMEOUT = 120
