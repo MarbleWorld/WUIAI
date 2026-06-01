@@ -1420,79 +1420,128 @@ def get_openai_client():
     return OpenAI(api_key=api_key)
 
 
-def get_access_token(client_id: str, client_secret: str, max_retries: int = 4) -> str:
-    last_err = None
+# def get_access_token(client_id: str, client_secret: str, max_retries: int = 4) -> str:
+#     last_err = None
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = SESSION.post(
-                TOKEN_URL,
-                data={
-                    "grant_type": "client_credentials",
-                    "client_id": client_id,
-                    "client_secret": client_secret,
-                },
-                headers={
-                    "User-Agent": UA,
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
-                timeout=(30, 120),
-            )
+#     for attempt in range(1, max_retries + 1):
+#         try:
+#             response = SESSION.post(
+#                 TOKEN_URL,
+#                 data={
+#                     "grant_type": "client_credentials",
+#                     "client_id": client_id,
+#                     "client_secret": client_secret,
+#                 },
+#                 headers={
+#                     "User-Agent": UA,
+#                     "Content-Type": "application/x-www-form-urlencoded",
+#                 },
+#                 timeout=(30, 120),
+#             )
 
-            if response.status_code == 401:
-                raise RuntimeError(
-                    "OpenSky rejected the credentials. Check [opensky] client_id and client_secret."
-                )
+#             if response.status_code == 401:
+#                 raise RuntimeError(
+#                     "OpenSky rejected the credentials. Check [opensky] client_id and client_secret."
+#                 )
 
-            if response.status_code == 403:
-                raise RuntimeError(
-                    f"OpenSky token endpoint returned 403. Response: {response.text[:800]}"
-                )
+#             if response.status_code == 403:
+#                 raise RuntimeError(
+#                     f"OpenSky token endpoint returned 403. Response: {response.text[:800]}"
+#                 )
 
-            if response.status_code == 429:
-                last_err = RuntimeError(
-                    f"OpenSky rate limited the token request. Response: {response.text[:800]}"
-                )
-                time.sleep(5 * attempt)
-                continue
+#             if response.status_code == 429:
+#                 last_err = RuntimeError(
+#                     f"OpenSky rate limited the token request. Response: {response.text[:800]}"
+#                 )
+#                 time.sleep(5 * attempt)
+#                 continue
 
-            if response.status_code >= 400:
-                last_err = RuntimeError(
-                    f"OpenSky token endpoint returned {response.status_code}: {response.text[:800]}"
-                )
-                time.sleep(3 * attempt)
-                continue
+#             if response.status_code >= 400:
+#                 last_err = RuntimeError(
+#                     f"OpenSky token endpoint returned {response.status_code}: {response.text[:800]}"
+#                 )
+#                 time.sleep(3 * attempt)
+#                 continue
 
-            payload = response.json()
-            access_token = str(payload.get("access_token", "")).strip()
+#             payload = response.json()
+#             access_token = str(payload.get("access_token", "")).strip()
 
-            if not access_token:
-                raise RuntimeError(
-                    f"OpenSky token response missing access_token. Response keys: {list(payload.keys())}"
-                )
+#             if not access_token:
+#                 raise RuntimeError(
+#                     f"OpenSky token response missing access_token. Response keys: {list(payload.keys())}"
+#                 )
 
-            return access_token
+#             return access_token
 
-        except requests.exceptions.ConnectTimeout as e:
-            last_err = e
-            time.sleep(4 * attempt)
+#         except requests.exceptions.ConnectTimeout as e:
+#             last_err = e
+#             time.sleep(4 * attempt)
 
-        except requests.exceptions.ReadTimeout as e:
-            last_err = e
-            time.sleep(4 * attempt)
+#         except requests.exceptions.ReadTimeout as e:
+#             last_err = e
+#             time.sleep(4 * attempt)
 
-        except requests.exceptions.ConnectionError as e:
-            last_err = e
-            time.sleep(4 * attempt)
+#         except requests.exceptions.ConnectionError as e:
+#             last_err = e
+#             time.sleep(4 * attempt)
 
-        except requests.exceptions.RequestException as e:
-            last_err = e
-            time.sleep(4 * attempt)
+#         except requests.exceptions.RequestException as e:
+#             last_err = e
+#             time.sleep(4 * attempt)
 
-    raise RuntimeError(
-        "Could not connect to the OpenSky auth server after multiple attempts. "
-        f"Last error: {type(last_err).__name__}: {last_err}"
-    )
+#     raise RuntimeError(
+#         "Could not connect to the OpenSky auth server after multiple attempts. "
+#         f"Last error: {type(last_err).__name__}: {last_err}"
+#     )
+
+
+@st.cache_data(ttl=25 * 60, show_spinner=False)
+def get_access_token(client_id: str, client_secret: str) -> str:
+    client_id = str(client_id or "").strip()
+    client_secret = str(client_secret or "").strip()
+
+    if not client_id or not client_secret:
+        raise RuntimeError("Missing OpenSky client_id or client_secret.")
+
+    try:
+        response = requests.post(
+            TOKEN_URL,
+            data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": UA,
+            },
+            timeout=(10, 20),
+        )
+    except requests.exceptions.Timeout:
+        raise RuntimeError(
+            "OpenSky token request timed out quickly. This is likely Streamlit Cloud outbound networking, OpenSky auth server delay, or bad endpoint reachability."
+        )
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"OpenSky token request failed before response: {type(e).__name__}: {e}")
+
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"OpenSky token request failed with HTTP {response.status_code}: {response.text[:1000]}"
+        )
+
+    try:
+        payload = response.json()
+    except Exception:
+        raise RuntimeError(f"OpenSky token response was not JSON: {response.text[:1000]}")
+
+    token = str(payload.get("access_token", "")).strip()
+
+    if not token:
+        raise RuntimeError(
+            f"OpenSky token response did not include access_token. Response keys: {list(payload.keys())}; body={response.text[:1000]}"
+        )
+
+    return token
 
 
 def fetch_states(token: str, bbox=None) -> dict:
